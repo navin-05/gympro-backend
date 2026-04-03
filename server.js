@@ -40,7 +40,13 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const mongoose = require('mongoose');
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    environment: process.env.NODE_ENV || 'development',
+  });
 });
 
 // Start server
@@ -50,8 +56,9 @@ const startServer = async () => {
   try {
     await connectDB();
     app.listen(PORT, () => {
-      console.log(`\n🏋️  Gym Management API running on http://localhost:${PORT}`);
-      console.log(`   Health check: http://localhost:${PORT}/api/health\n`);
+      console.log(`\n🏋️  Gym Management API running on port ${PORT}`);
+      console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`   Health check: /api/health\n`);
     });
   } catch (error) {
     console.error('Failed to start server:', error.message);
