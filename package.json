@@ -1,0 +1,21 @@
+{
+  "name": "gym-management-backend",
+  "version": "1.0.0",
+  "description": "Gym Management Application Backend API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "expo": "^55.0.10",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb-memory-server": "^10.0.0",
+    "mongoose": "^8.6.0",
+    "qrcode": "^1.5.4"
+  }
+}
