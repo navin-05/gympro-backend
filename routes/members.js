@@ -13,12 +13,20 @@ function generateReferralCode(name) {
   return `${cleanName}${random}`;
 }
 
-// GET /api/members — list with search and filters
+// GET /api/members — list with search, filters, pagination
 router.get('/', auth, async (req, res) => {
   try {
-    const { search, status, hasDues } = req.query;
+    console.log("Members API hit");
+
+    const { search, status, hasDues, page = 1, limit = 10 } = req.query;
+
+    const now = new Date();
+    const sevenDaysFromNow = new Date();
+    sevenDaysFromNow.setDate(now.getDate() + 7);
+
     let query = { owner: req.user._id };
 
+    // 🔍 Search
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -26,62 +34,63 @@ router.get('/', auth, async (req, res) => {
       ];
     }
 
-    let members = await Member.find(query)
-      .populate('plan', 'planName durationDays price')
-      .sort({ createdAt: -1 });
-
-    if (status) {
-      const now = new Date();
-      members = members.filter(m => {
-        const expiry = new Date(m.expiryDate);
-        const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
-        if (status === 'active') return daysLeft > 7;
-        if (status === 'expiring') return daysLeft >= 0 && daysLeft <= 7;
-        if (status === 'expired') return daysLeft < 0;
-        return true;
-      });
+    // 📊 Status filter (DB-level instead of JS loop)
+    if (status === 'active') {
+      query.expiryDate = { $gt: sevenDaysFromNow };
+    } else if (status === 'expiring') {
+      query.expiryDate = { $gte: now, $lte: sevenDaysFromNow };
+    } else if (status === 'expired') {
+      query.expiryDate = { $lt: now };
     }
 
+    // 💰 Dues filter
     if (hasDues === 'true') {
-      members = members.filter(m => m.dueAmount > 0);
+      query.dueAmount = { $gt: 0 };
     }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const members = await Member.find(query)
+      .select('name mobile expiryDate plan dueAmount paidAmount createdAt') // 🔥 reduce payload
+      .populate('plan', 'planName durationDays price')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
     res.json(members);
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+
 // ─── IMPORTANT: Specific sub-routes MUST come BEFORE generic /:id routes ───
 
-// POST /api/members/:id/renewals — Renew membership and save renewal record
+// POST /api/members/:id/renewals
 router.post('/:id/renewals', auth, async (req, res) => {
   console.log('[API] POST /members/:id/renewals — id:', req.params.id, 'body:', req.body);
   try {
     const planId = req.body.plan || req.body.planId;
     const paidAmount = req.body.paidAmount ?? req.body.amount ?? 0;
+
     const member = await Member.findOne({ _id: req.params.id, owner: req.user._id });
-    if (!member) {
-      return res.status(404).json({ error: 'Member not found' });
-    }
+    if (!member) return res.status(404).json({ error: 'Member not found' });
 
     const plan = await MembershipPlan.findOne({ _id: planId, owner: req.user._id });
-    if (!plan) {
-      return res.status(400).json({ error: 'Invalid membership plan' });
-    }
+    if (!plan) return res.status(400).json({ error: 'Invalid membership plan' });
 
     const previousExpiry = new Date(member.expiryDate);
 
-    // If member is still active, extend from current expiry. Otherwise extend from today.
     const now = new Date();
     const baseDate = previousExpiry > now ? previousExpiry : now;
+
     const newExpiry = new Date(baseDate);
     newExpiry.setDate(newExpiry.getDate() + plan.durationDays);
 
     const paid = paidAmount || 0;
     const due = Math.max(0, plan.price - paid);
 
-    // Save renewal record
     const renewal = new Renewal({
       member: member._id,
       owner: req.user._id,
@@ -93,65 +102,70 @@ router.post('/:id/renewals', auth, async (req, res) => {
       previousExpiryDate: previousExpiry,
       newExpiryDate: newExpiry,
     });
-    await renewal.save();
-    console.log('[API] Renewal saved:', renewal._id);
 
-    // Update member
+    await renewal.save();
+
     member.plan = planId;
     member.planName = plan.planName;
     member.startDate = baseDate;
     member.expiryDate = newExpiry;
     member.paidAmount = paid;
     member.dueAmount = due;
-    await member.save();
-    console.log('[API] Member updated — new expiry:', newExpiry);
 
-    const populatedMember = await Member.findById(member._id).populate('plan', 'planName durationDays price');
+    await member.save();
+
+    const populatedMember = await Member.findById(member._id)
+      .populate('plan', 'planName durationDays price');
+
     res.json({ member: populatedMember, renewal });
+
   } catch (error) {
-    console.log('[API] Renew error:', error.message);
     res.status(400).json({ error: error.message });
   }
 });
 
-// GET /api/members/:id/renewals — Get renewal history
+
+// GET /api/members/:id/renewals
 router.get('/:id/renewals', auth, async (req, res) => {
-  console.log('[API] GET /members/:id/renewals — id:', req.params.id);
   try {
     const renewals = await Renewal.find({
       member: req.params.id,
       owner: req.user._id,
     }).sort({ createdAt: -1 });
-    console.log('[API] Found', renewals.length, 'renewal records');
+
     res.json(renewals);
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET /api/members/:id — single member
+
+// GET /api/members/:id
 router.get('/:id', auth, async (req, res) => {
   try {
-    const member = await Member.findOne({ _id: req.params.id, owner: req.user._id })
-      .populate('plan', 'planName durationDays price');
-    if (!member) {
-      return res.status(404).json({ error: 'Member not found' });
-    }
+    const member = await Member.findOne({
+      _id: req.params.id,
+      owner: req.user._id
+    }).populate('plan', 'planName durationDays price');
+
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
     res.json(member);
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST /api/members — create member
+
+// POST /api/members
 router.post('/', auth, async (req, res) => {
   try {
     const { photo, name, mobile, email, plan: planId, startDate, paidAmount, referredBy } = req.body;
 
     const plan = await MembershipPlan.findOne({ _id: planId, owner: req.user._id });
-    if (!plan) {
-      return res.status(400).json({ error: 'Invalid membership plan' });
-    }
+    if (!plan) return res.status(400).json({ error: 'Invalid membership plan' });
 
     const start = new Date(startDate);
     const expiry = new Date(start);
@@ -159,7 +173,6 @@ router.post('/', auth, async (req, res) => {
 
     const paid = paidAmount || 0;
     const due = Math.max(0, plan.price - paid);
-    const referralCode = generateReferralCode(name);
 
     const member = new Member({
       owner: req.user._id,
@@ -173,7 +186,7 @@ router.post('/', auth, async (req, res) => {
       expiryDate: expiry,
       paidAmount: paid,
       dueAmount: due,
-      referralCode,
+      referralCode: generateReferralCode(name),
       referredBy: referredBy || ''
     });
 
@@ -181,66 +194,49 @@ router.post('/', auth, async (req, res) => {
 
     const qrDataUrl = await QRCode.toDataURL(member._id.toString(), { width: 300, margin: 2 });
     member.qrCode = qrDataUrl;
+
     await member.save();
 
-    if (referredBy) {
-      const referrer = await Member.findOne({ referralCode: referredBy, owner: req.user._id });
-      if (referrer) {
-        referrer.referralCount = (referrer.referralCount || 0) + 1;
-        await referrer.save();
-      }
-    }
+    res.status(201).json(member);
 
-    const populatedMember = await Member.findById(member._id).populate('plan', 'planName durationDays price');
-    res.status(201).json(populatedMember);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 });
 
-// PUT /api/members/:id — update member
+
+// PUT /api/members/:id
 router.put('/:id', auth, async (req, res) => {
   try {
-    const updates = req.body;
     const member = await Member.findOne({ _id: req.params.id, owner: req.user._id });
-    if (!member) {
-      return res.status(404).json({ error: 'Member not found' });
-    }
+    if (!member) return res.status(404).json({ error: 'Member not found' });
 
-    if (updates.plan && updates.plan !== member.plan.toString()) {
-      const plan = await MembershipPlan.findById(updates.plan);
-      if (plan) {
-        const start = new Date(updates.startDate || member.startDate);
-        const expiry = new Date(start);
-        expiry.setDate(expiry.getDate() + plan.durationDays);
-        updates.expiryDate = expiry;
-        updates.planName = plan.planName;
-        const paid = updates.paidAmount != null ? updates.paidAmount : member.paidAmount;
-        updates.dueAmount = Math.max(0, plan.price - paid);
-      }
-    }
+    Object.assign(member, req.body);
 
-    Object.keys(updates).forEach(key => {
-      member[key] = updates[key];
-    });
     await member.save();
 
-    const populatedMember = await Member.findById(member._id).populate('plan', 'planName durationDays price');
-    res.json(populatedMember);
+    res.json(member);
+
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 });
+
 
 // DELETE /api/members/:id
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const member = await Member.findOneAndDelete({ _id: req.params.id, owner: req.user._id });
-    if (!member) {
-      return res.status(404).json({ error: 'Member not found' });
-    }
+    const member = await Member.findOneAndDelete({
+      _id: req.params.id,
+      owner: req.user._id
+    });
+
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
     await Renewal.deleteMany({ member: req.params.id });
+
     res.json({ message: 'Member deleted successfully' });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -4,7 +4,8 @@ const memberSchema = new mongoose.Schema({
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     required: true,
-    ref: 'User'
+    ref: 'User',
+    index: true // 🔥 helps owner-based queries
   },
   photo: {
     type: String,
@@ -13,12 +14,14 @@ const memberSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    index: true // 🔥 helps search
   },
   mobile: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    index: true // 🔥 helps search
   },
   email: {
     type: String,
@@ -37,11 +40,13 @@ const memberSchema = new mongoose.Schema({
   },
   startDate: {
     type: Date,
-    required: true
+    required: true,
+    index: true // 🔥 used for revenue queries
   },
   expiryDate: {
     type: Date,
-    required: true
+    required: true,
+    index: true // 🔥 VERY IMPORTANT (dashboard filters)
   },
   paidAmount: {
     type: Number,
@@ -51,7 +56,8 @@ const memberSchema = new mongoose.Schema({
   dueAmount: {
     type: Number,
     default: 0,
-    min: 0
+    min: 0,
+    index: true // 🔥 used in dues filter
   },
   referralCode: {
     type: String,
@@ -74,8 +80,12 @@ const memberSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// 🔥 COMPOUND INDEX (VERY IMPORTANT)
+memberSchema.index({ owner: 1, expiryDate: 1 });
+memberSchema.index({ owner: 1, createdAt: -1 });
+
 // Virtual for membership status
-memberSchema.virtual('status').get(function() {
+memberSchema.virtual('status').get(function () {
   const now = new Date();
   const expiry = new Date(this.expiryDate);
   const daysUntilExpiry = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
