@@ -13,12 +13,79 @@ function generateReferralCode(name) {
   return `${cleanName}${random}`;
 }
 
+// Simple in-memory cache for fast, repeated member list queries.
+const MEMBERS_CACHE_TTL_MS = 15000;
+const membersCache = new Map();
+
+function escapeRegex(value = '') {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getMembersCacheKey({
+  owner,
+  search = '',
+  status = '',
+  hasDues = '',
+  page = 1,
+  limit = 50,
+}) {
+  return JSON.stringify({
+    owner: String(owner),
+    search: String(search).trim().toLowerCase(),
+    status: String(status || '').toLowerCase(),
+    hasDues: String(hasDues || '').toLowerCase(),
+    page: Number(page),
+    limit: Number(limit),
+  });
+}
+
+function getCachedMembers(cacheKey) {
+  const entry = membersCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    membersCache.delete(cacheKey);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedMembers(cacheKey, data) {
+  membersCache.set(cacheKey, {
+    data,
+    expiresAt: Date.now() + MEMBERS_CACHE_TTL_MS,
+  });
+}
+
+function invalidateOwnerMembersCache(ownerId) {
+  const owner = String(ownerId);
+  for (const [key] of membersCache) {
+    if (key.includes(`"owner":"${owner}"`)) {
+      membersCache.delete(key);
+    }
+  }
+}
+
 // GET /api/members — list with search, filters, pagination
 router.get('/', auth, async (req, res) => {
   try {
-    console.log("Members API hit");
+    const { search = '', status = '', hasDues, page = 1, limit = 50 } = req.query;
 
-    const { search, status, hasDues, page = 1, limit = 10 } = req.query;
+    const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const skip = (parsedPage - 1) * parsedLimit;
+
+    const cacheKey = getMembersCacheKey({
+      owner: req.user._id,
+      search,
+      status,
+      hasDues,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+    const cachedData = getCachedMembers(cacheKey);
+    if (cachedData) {
+      return res.json(cachedData);
+    }
 
     const now = new Date();
     const sevenDaysFromNow = new Date();
@@ -26,15 +93,17 @@ router.get('/', auth, async (req, res) => {
 
     let query = { owner: req.user._id };
 
-    // 🔍 Search
-    if (search) {
+    // Search by name or mobile
+    const normalizedSearch = String(search).trim();
+    if (normalizedSearch) {
+      const safeRegex = new RegExp(escapeRegex(normalizedSearch), 'i');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { mobile: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { mobile: safeRegex },
       ];
     }
 
-    // 📊 Status filter (DB-level instead of JS loop)
+    // Status filter
     if (status === 'active') {
       query.expiryDate = { $gt: sevenDaysFromNow };
     } else if (status === 'expiring') {
@@ -43,20 +112,19 @@ router.get('/', auth, async (req, res) => {
       query.expiryDate = { $lt: now };
     }
 
-    // 💰 Dues filter
+    // Dues filter
     if (hasDues === 'true') {
       query.dueAmount = { $gt: 0 };
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
     const members = await Member.find(query)
-      .select('name mobile expiryDate plan dueAmount paidAmount createdAt') // 🔥 reduce payload
-      .populate('plan', 'planName durationDays price')
+      .select('name mobile photo email plan planName startDate expiryDate paidAmount dueAmount referralCode referredBy referralCount qrCode createdAt updatedAt')
+      .lean()
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(parseInt(limit));
+      .limit(parsedLimit);
 
+    setCachedMembers(cacheKey, members);
     res.json(members);
 
   } catch (error) {
@@ -113,6 +181,7 @@ router.post('/:id/renewals', auth, async (req, res) => {
     member.dueAmount = due;
 
     await member.save();
+    invalidateOwnerMembersCache(req.user._id);
 
     const populatedMember = await Member.findById(member._id)
       .populate('plan', 'planName durationDays price');
@@ -191,11 +260,13 @@ router.post('/', auth, async (req, res) => {
     });
 
     await member.save();
+    invalidateOwnerMembersCache(req.user._id);
 
     const qrDataUrl = await QRCode.toDataURL(member._id.toString(), { width: 300, margin: 2 });
     member.qrCode = qrDataUrl;
 
     await member.save();
+    invalidateOwnerMembersCache(req.user._id);
 
     res.status(201).json(member);
 
@@ -214,6 +285,7 @@ router.put('/:id', auth, async (req, res) => {
     Object.assign(member, req.body);
 
     await member.save();
+    invalidateOwnerMembersCache(req.user._id);
 
     res.json(member);
 
@@ -234,6 +306,7 @@ router.delete('/:id', auth, async (req, res) => {
     if (!member) return res.status(404).json({ error: 'Member not found' });
 
     await Renewal.deleteMany({ member: req.params.id });
+    invalidateOwnerMembersCache(req.user._id);
 
     res.json({ message: 'Member deleted successfully' });
 

@@ -81,7 +81,15 @@ const memberSchema = new mongoose.Schema({
 });
 
 // 🔥 COMPOUND INDEX (VERY IMPORTANT)
+memberSchema.index({ owner: 1 });
+memberSchema.index({ expiryDate: 1 });
+memberSchema.index({ dueAmount: 1 });
+memberSchema.index({ name: 1 });
+memberSchema.index({ mobile: 1 });
 memberSchema.index({ owner: 1, expiryDate: 1 });
+memberSchema.index({ owner: 1, dueAmount: 1 });
+memberSchema.index({ owner: 1, name: 1 });
+memberSchema.index({ owner: 1, mobile: 1 });
 memberSchema.index({ owner: 1, createdAt: -1 });
 
 // Virtual for membership status
