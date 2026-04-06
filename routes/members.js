@@ -17,25 +17,11 @@ function generateReferralCode(name) {
 const MEMBERS_CACHE_TTL_MS = 15000;
 const membersCache = new Map();
 
-function escapeRegex(value = '') {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function getMembersCacheKey({
   owner,
-  search = '',
-  status = '',
-  hasDues = '',
-  page = 1,
-  limit = 50,
 }) {
   return JSON.stringify({
     owner: String(owner),
-    search: String(search).trim().toLowerCase(),
-    status: String(status || '').toLowerCase(),
-    hasDues: String(hasDues || '').toLowerCase(),
-    page: Number(page),
-    limit: Number(limit),
   });
 }
 
@@ -68,61 +54,19 @@ function invalidateOwnerMembersCache(ownerId) {
 // GET /api/members — list with search, filters, pagination
 router.get('/', auth, async (req, res) => {
   try {
-    const { search = '', status = '', hasDues, page = 1, limit = 50 } = req.query;
-
-    const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
-    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    const skip = (parsedPage - 1) * parsedLimit;
-
     const cacheKey = getMembersCacheKey({
       owner: req.user._id,
-      search,
-      status,
-      hasDues,
-      page: parsedPage,
-      limit: parsedLimit,
     });
     const cachedData = getCachedMembers(cacheKey);
     if (cachedData) {
       return res.json(cachedData);
     }
 
-    const now = new Date();
-    const sevenDaysFromNow = new Date();
-    sevenDaysFromNow.setDate(now.getDate() + 7);
-
-    let query = { owner: req.user._id };
-
-    // Search by name or mobile
-    const normalizedSearch = String(search).trim();
-    if (normalizedSearch) {
-      const safeRegex = new RegExp(escapeRegex(normalizedSearch), 'i');
-      query.$or = [
-        { name: safeRegex },
-        { mobile: safeRegex },
-      ];
-    }
-
-    // Status filter
-    if (status === 'active') {
-      query.expiryDate = { $gt: sevenDaysFromNow };
-    } else if (status === 'expiring') {
-      query.expiryDate = { $gte: now, $lte: sevenDaysFromNow };
-    } else if (status === 'expired') {
-      query.expiryDate = { $lt: now };
-    }
-
-    // Dues filter
-    if (hasDues === 'true') {
-      query.dueAmount = { $gt: 0 };
-    }
-
-    const members = await Member.find(query)
-      .select('name mobile photo email plan planName startDate expiryDate paidAmount dueAmount referralCode referredBy referralCount qrCode createdAt updatedAt')
+    const members = await Member.find({ owner: req.user._id })
+      .select('_id name mobile planName expiryDate dueAmount photo')
       .lean()
       .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parsedLimit);
+      .limit(5000);
 
     setCachedMembers(cacheKey, members);
     res.json(members);
