@@ -19,9 +19,11 @@ const membersCache = new Map();
 
 function getMembersCacheKey({
   owner,
+  mode = 'list',
 }) {
   return JSON.stringify({
     owner: String(owner),
+    mode: String(mode),
   });
 }
 
@@ -54,16 +56,22 @@ function invalidateOwnerMembersCache(ownerId) {
 // GET /api/members — list with search, filters, pagination
 router.get('/', auth, async (req, res) => {
   try {
+    const mode = req.query.mode === 'analytics' ? 'analytics' : 'list';
     const cacheKey = getMembersCacheKey({
       owner: req.user._id,
+      mode,
     });
     const cachedData = getCachedMembers(cacheKey);
     if (cachedData) {
       return res.json(cachedData);
     }
 
+    const selectFields = mode === 'analytics'
+      ? '_id name mobile photo planName startDate expiryDate paidAmount dueAmount createdAt updatedAt'
+      : '_id name mobile planName expiryDate dueAmount photo';
+
     const members = await Member.find({ owner: req.user._id })
-      .select('_id name mobile planName expiryDate dueAmount photo')
+      .select(selectFields)
       .lean()
       .sort({ createdAt: -1 })
       .limit(5000);

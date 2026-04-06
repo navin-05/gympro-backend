@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Member = require('../models/Member');
+const Renewal = require('../models/Renewal');
 const Attendance = require('../models/Attendance');
 const auth = require('../middleware/auth');
 const NodeCache = require("node-cache");
@@ -27,7 +28,9 @@ router.get('/', auth, async (req, res) => {
     const sevenDaysFromNow = new Date();
     sevenDaysFromNow.setDate(now.getDate() + 7);
 
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // Use local month boundaries; inclusive start, exclusive end.
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
 
     // 🔥 Run all DB queries in parallel
     const [
@@ -36,7 +39,8 @@ router.get('/', auth, async (req, res) => {
       expiringSoon,
       expiredMembers,
       pendingDues,
-      revenueData,
+      newMembersRevenueData,
+      renewalsRevenueData,
       todayAttendance
     ] = await Promise.all([
 
@@ -66,13 +70,28 @@ router.get('/', auth, async (req, res) => {
         {
           $match: {
             owner: req.user._id,
-            startDate: { $gte: monthStart }
+            startDate: { $gte: monthStart, $lt: monthEnd }
           }
         },
         {
           $group: {
             _id: null,
-            total: { $sum: "$paidAmount" }
+            total: { $sum: { $ifNull: ["$paidAmount", 0] } }
+          }
+        }
+      ]),
+
+      Renewal.aggregate([
+        {
+          $match: {
+            owner: req.user._id,
+            renewalDate: { $gte: monthStart, $lt: monthEnd }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ["$amount", 0] } }
           }
         }
       ]),
@@ -86,12 +105,18 @@ router.get('/', auth, async (req, res) => {
 
     console.log("DB queries executed");
 
+    const newMembersRevenueThisMonth = newMembersRevenueData[0]?.total || 0;
+    const renewalsRevenueThisMonth = renewalsRevenueData[0]?.total || 0;
+    const revenueThisMonth = newMembersRevenueThisMonth + renewalsRevenueThisMonth;
+
     const responseData = {
       totalMembers,
       activeMembers,
       expiringSoon,
       expiredMembers,
-      revenueThisMonth: revenueData[0]?.total || 0,
+      revenueThisMonth,
+      newMembersRevenueThisMonth,
+      renewalsRevenueThisMonth,
       pendingDues,
       todayAttendance
     };
