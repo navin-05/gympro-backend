@@ -23,7 +23,42 @@ const getEnquiries = async (req, res) => {
   }
 };
 
+const updateEnquiry = async (req, res) => {
+  try {
+    const existing = await Enquiry.findById(req.params.id);
+    if (!existing || String(existing.owner) !== String(req.user._id)) {
+      return res.status(404).json({ error: 'Enquiry not found' });
+    }
+
+    const enquiry = await Enquiry.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    return res.status(200).json(enquiry);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+const deleteEnquiry = async (req, res) => {
+  try {
+    const enquiry = await Enquiry.findById(req.params.id);
+    if (!enquiry || String(enquiry.owner) !== String(req.user._id)) {
+      return res.status(404).json({ error: 'Enquiry not found' });
+    }
+
+    await Enquiry.findByIdAndDelete(req.params.id);
+    return res.status(200).json({ message: 'Enquiry deleted successfully' });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   createEnquiry,
-  getEnquiries
+  getEnquiries,
+  updateEnquiry,
+  deleteEnquiry
 };

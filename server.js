@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const rateLimit = require('express-rate-limit');
 const { connectDB } = require('./config/db');
+const enquiryRoutes = require('./routes/enquiryRoutes');
 
 // Load environment variables
 dotenv.config();
@@ -60,7 +61,7 @@ app.use('/api/transformations', require('./routes/transformations'));
 app.use('/api/referrals', require('./routes/referrals'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/dashboard', require('./routes/dashboard'));
-app.use('/api/enquiries', require('./routes/enquiryRoutes'));
+app.use('/api/enquiries', enquiryRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
