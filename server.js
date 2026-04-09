@@ -60,6 +60,7 @@ app.use('/api/transformations', require('./routes/transformations'));
 app.use('/api/referrals', require('./routes/referrals'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/dashboard', require('./routes/dashboard'));
+app.use('/api/enquiries', require('./routes/enquiryRoutes'));
 
 // Health check
 app.get('/api/health', (req, res) => {
