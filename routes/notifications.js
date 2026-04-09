@@ -1,109 +1,143 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
-const Notification = require('../models/Notification');
 const Member = require('../models/Member');
 const auth = require('../middleware/auth');
 
+// Helper to classify members into expiring / expired based on expiryDate
+const classifyMembersByExpiry = (members) => {
+  const expiring = [];
+  const expired = [];
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  for (const member of members) {
+    if (!member.expiryDate) {
+      continue;
+    }
+
+    const expiry = new Date(member.expiryDate);
+    if (isNaN(expiry)) {
+      console.log('SKIPPING MEMBER WITH INVALID EXPIRY:', {
+        memberId: member._id,
+        name: member.name,
+        rawExpiry: member.expiryDate
+      });
+      continue;
+    }
+
+    const diffTime = expiry - today;
+    const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    if (daysLeft < 0) {
+      expired.push({ ...member, daysLeft });
+    } else if (daysLeft <= 7) {
+      expiring.push({ ...member, daysLeft });
+    }
+  }
+
+  console.log('CLASSIFICATION RESULT:', {
+    expiringCount: expiring.length,
+    expiredCount: expired.length
+  });
+
+  return { expiring, expired };
+};
+
 // GET /api/notifications
+// Returns expiring and expired members for the authenticated owner
 router.get('/', auth, async (req, res) => {
   try {
-    const notifications = await Notification.find({ owner: req.user._id })
-      .populate('member', 'name photo')
-      .sort({ createdAt: -1 })
-      .limit(50);
-    res.json(notifications);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+    console.log('GET /api/notifications');
+    console.log('REQ USER:', req.user);
+    console.log('USER ID:', req.user?._id);
 
-// POST /api/notifications/generate — scan members and create expiry notifications
-router.post('/generate', auth, async (req, res) => {
-  try {
-    const now = new Date();
-    const members = await Member.find({ owner: req.user._id });
-    const notifications = [];
-
-    for (const member of members) {
-      const expiry = new Date(member.expiryDate);
-      const daysUntilExpiry = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
-
-      let message = null;
-      let type = null;
-
-      // Before expiry reminders
-      if (daysUntilExpiry === 7) {
-        type = 'expiry_reminder';
-        message = `Hello ${member.name}, your membership will expire in 7 days on ${expiry.toLocaleDateString()}. Please renew to continue your workouts.`;
-      } else if (daysUntilExpiry === 3) {
-        type = 'expiry_reminder';
-        message = `Hello ${member.name}, your membership will expire in 3 days on ${expiry.toLocaleDateString()}. Please renew soon.`;
-      } else if (daysUntilExpiry === 1) {
-        type = 'expiry_reminder';
-        message = `Hello ${member.name}, your membership expires tomorrow on ${expiry.toLocaleDateString()}. Renew now!`;
-      } else if (daysUntilExpiry === 0) {
-        type = 'expiry_reminder';
-        message = `Hello ${member.name}, your membership expires today! Please renew to continue your training.`;
-      }
-      // After expiry recovery reminders
-      else if (daysUntilExpiry === -3) {
-        type = 'expiry_recovery';
-        message = `Hello ${member.name}, your membership expired 3 days ago. Renew now to continue your training.`;
-      } else if (daysUntilExpiry === -7) {
-        type = 'expiry_recovery';
-        message = `Hello ${member.name}, your membership expired 7 days ago. We miss you! Renew to get back on track.`;
-      }
-
-      // Payment due reminder
-      if (member.dueAmount > 0) {
-        const paymentNotif = new Notification({
-          owner: req.user._id,
-          member: member._id,
-          type: 'payment_due',
-          message: `${member.name} has a pending payment of ₹${member.dueAmount}.`
-        });
-        notifications.push(paymentNotif);
-      }
-
-      if (message && type) {
-        const notification = new Notification({
-          owner: req.user._id,
-          member: member._id,
-          type,
-          message
-        });
-        notifications.push(notification);
-      }
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: 'User not authenticated', debug: 'Missing req.user or req.user._id' });
     }
 
-    // Save all generated notifications
-    if (notifications.length > 0) {
-      await Notification.insertMany(notifications);
+    const ownerId = new mongoose.Types.ObjectId(req.user._id);
+
+    const members = await Member.find({ owner: ownerId }).lean();
+
+    console.log('TOTAL MEMBERS FOUND:', members.length);
+    console.log('FIRST MEMBER:', members[0]);
+
+    if (!members || members.length === 0) {
+      return res.json({
+        debug: 'No members found for this user',
+        userId: req.user._id
+      });
     }
 
-    res.json({
-      message: `${notifications.length} notification(s) generated`,
-      count: notifications.length
+    console.log('EXPIRY TYPE:', typeof members[0]?.expiryDate);
+    console.log('EXPIRY VALUE:', members[0]?.expiryDate);
+
+    const { expiring, expired } = classifyMembersByExpiry(members);
+
+    console.log('FINAL EXPIRING:', expiring.length);
+    console.log('FINAL EXPIRED:', expired.length);
+
+    return res.json({
+      expiring,
+      expired
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('ERROR IN GET /api/notifications:', error);
+    return res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
-// PUT /api/notifications/:id/read — mark as read
-router.put('/:id/read', auth, async (req, res) => {
+// POST /api/notifications/generate
+// Scans members and returns expiring / expired summary (no cron dependency)
+router.post('/generate', auth, async (req, res) => {
   try {
-    const notification = await Notification.findOneAndUpdate(
-      { _id: req.params.id, owner: req.user._id },
-      { read: true },
-      { new: true }
-    );
-    if (!notification) {
-      return res.status(404).json({ error: 'Notification not found' });
+    console.log('POST /api/notifications/generate');
+    console.log('REQ USER:', req.user);
+    console.log('USER ID:', req.user?._id);
+
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: 'User not authenticated', debug: 'Missing req.user or req.user._id' });
     }
-    res.json(notification);
+
+    const ownerId = new mongoose.Types.ObjectId(req.user._id);
+
+    const members = await Member.find({ owner: ownerId }).lean();
+
+    console.log('TOTAL MEMBERS FOUND:', members.length);
+    console.log('FIRST MEMBER:', members[0]);
+
+    if (!members || members.length === 0) {
+      return res.json({
+        success: true,
+        debug: 'No members found for this user',
+        userId: req.user._id,
+        expiringCount: 0,
+        expiredCount: 0,
+        expiring: [],
+        expired: []
+      });
+    }
+
+    console.log('EXPIRY TYPE:', typeof members[0]?.expiryDate);
+    console.log('EXPIRY VALUE:', members[0]?.expiryDate);
+
+    const { expiring, expired } = classifyMembersByExpiry(members);
+
+    console.log('FINAL EXPIRING:', expiring.length);
+    console.log('FINAL EXPIRED:', expired.length);
+
+    return res.json({
+      success: true,
+      expiringCount: expiring.length,
+      expiredCount: expired.length,
+      expiring,
+      expired
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    console.error('ERROR IN POST /api/notifications/generate:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
   }
 });
 
