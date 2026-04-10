@@ -3,6 +3,7 @@ const router = express.Router();
 const Attendance = require('../models/Attendance');
 const Member = require('../models/Member');
 const auth = require('../middleware/auth');
+const { recordCheckinAttempt, WINDOW_MS: BURST_WINDOW_MS } = require('../middleware/checkinBurstGuard');
 
 // POST /api/attendance/checkin
 router.post('/checkin', auth, async (req, res) => {
@@ -17,7 +18,6 @@ router.post('/checkin', auth, async (req, res) => {
       return res.status(404).json({ error: 'Member not found' });
     }
 
-    // Check if membership is expired
     const now = new Date();
     if (new Date(member.expiryDate) < now) {
       return res.status(403).json({
@@ -26,29 +26,61 @@ router.post('/checkin', auth, async (req, res) => {
       });
     }
 
-    // Create today's date string for duplicate checking
     const today = now.toISOString().split('T')[0];
+
+    const existing = await Attendance.findOne({
+      member: memberId,
+      owner: req.user._id,
+      date: today,
+    }).lean();
+
+    if (existing) {
+      return res.status(200).json({
+        message: `${member.name} already checked in today.`,
+        alreadyCheckedIn: true,
+        checkInTime: existing.checkInTime,
+        memberName: member.name,
+        memberStatus: member.status,
+      });
+    }
+
+    const burst = recordCheckinAttempt(req.user._id, memberId);
+    if (!burst.ok) {
+      return res.status(429).json({
+        error: 'Too many check-in attempts',
+        message: `Please wait before trying again (${BURST_WINDOW_MS / 1000}s cooldown).`,
+      });
+    }
 
     try {
       const attendance = new Attendance({
         member: memberId,
         owner: req.user._id,
         checkInTime: now,
-        date: today
+        date: today,
       });
       await attendance.save();
 
       res.status(201).json({
         message: `${member.name} checked in successfully!`,
+        alreadyCheckedIn: false,
         checkInTime: now,
         memberName: member.name,
-        memberStatus: member.status
+        memberStatus: member.status,
       });
     } catch (dupError) {
       if (dupError.code === 11000) {
-        return res.status(400).json({
-          error: 'Already checked in',
-          message: `${member.name} has already checked in today.`
+        const again = await Attendance.findOne({
+          member: memberId,
+          owner: req.user._id,
+          date: today,
+        }).lean();
+        return res.status(200).json({
+          message: `${member.name} already checked in today.`,
+          alreadyCheckedIn: true,
+          checkInTime: again?.checkInTime || now,
+          memberName: member.name,
+          memberStatus: member.status,
         });
       }
       throw dupError;

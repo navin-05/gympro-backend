@@ -51,12 +51,21 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // 🔥 Apply strict limiter only to auth routes
 app.use('/api/auth', authLimiter, require('./routes/auth'));
 
+// Attendance: extra per-IP cap (check-in is bursty from QR / retries)
+const attendanceLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 45,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attendance requests. Please slow down.' },
+});
+
 // Other routes
 app.use('/api/gym', require('./routes/gym'));
 app.use('/api/plans', require('./routes/plans'));
 app.use('/api/members', require('./routes/members'));
 app.use('/api/payments', require('./routes/payments'));
-app.use('/api/attendance', require('./routes/attendance'));
+app.use('/api/attendance', attendanceLimiter, require('./routes/attendance'));
 app.use('/api/transformations', require('./routes/transformations'));
 app.use('/api/referrals', require('./routes/referrals'));
 app.use('/api/notifications', require('./routes/notifications'));
