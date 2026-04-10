@@ -234,12 +234,72 @@ router.put('/:id', auth, async (req, res) => {
     const member = await Member.findOne({ _id: req.params.id, owner: req.user._id });
     if (!member) return res.status(404).json({ error: 'Member not found' });
 
-    Object.assign(member, req.body);
+    const {
+      name,
+      mobile,
+      email,
+      photo,
+      plan: planId,
+      startDate,
+      paidAmount,
+      paid,
+      due,
+    } = req.body;
+
+    if (typeof name !== 'undefined') member.name = name;
+    if (typeof mobile !== 'undefined') member.mobile = mobile;
+    if (typeof email !== 'undefined') member.email = email;
+    if (typeof photo !== 'undefined') member.photo = photo;
+
+    const nextPaidAmount = typeof paidAmount !== 'undefined'
+      ? Number(paidAmount)
+      : (typeof paid !== 'undefined' ? Number(paid) : member.paidAmount);
+
+    if (!Number.isFinite(nextPaidAmount) || nextPaidAmount < 0) {
+      return res.status(400).json({ error: 'Invalid paid amount' });
+    }
+
+    let planDoc = null;
+    if (typeof planId !== 'undefined' && String(planId).trim() !== '') {
+      planDoc = await MembershipPlan.findOne({ _id: planId, owner: req.user._id });
+      if (!planDoc) return res.status(400).json({ error: 'Invalid membership plan' });
+      member.plan = planDoc._id;
+      member.planName = planDoc.planName;
+    } else if (member.plan) {
+      planDoc = await MembershipPlan.findOne({ _id: member.plan, owner: req.user._id });
+    }
+
+    if (typeof startDate !== 'undefined') {
+      const parsedStartDate = new Date(startDate);
+      if (Number.isNaN(parsedStartDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid start date' });
+      }
+      member.startDate = parsedStartDate;
+    }
+
+    if (planDoc) {
+      const nextExpiryDate = new Date(member.startDate);
+      nextExpiryDate.setDate(nextExpiryDate.getDate() + planDoc.durationDays);
+      member.expiryDate = nextExpiryDate;
+    }
+
+    member.paidAmount = nextPaidAmount;
+    if (typeof due !== 'undefined') {
+      const dueAmount = Number(due);
+      if (!Number.isFinite(dueAmount) || dueAmount < 0) {
+        return res.status(400).json({ error: 'Invalid due amount' });
+      }
+      member.dueAmount = dueAmount;
+    } else if (planDoc) {
+      member.dueAmount = Math.max(0, Number(planDoc.price || 0) - member.paidAmount);
+    }
 
     await member.save();
     invalidateOwnerMembersCache(req.user._id);
 
-    res.json(member);
+    const updatedMember = await Member.findById(member._id)
+      .populate('plan', 'planName durationDays price');
+    res.json(updatedMember);
 
   } catch (error) {
     res.status(400).json({ error: error.message });
