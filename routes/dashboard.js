@@ -14,7 +14,14 @@ router.get('/', auth, async (req, res) => {
   try {
     console.log("Dashboard API hit");
 
-    const cacheKey = `dashboard_${req.user._id}`;
+    // Support optional month/year query params for revenue
+    const reqMonth = req.query.month !== undefined ? parseInt(req.query.month) : null;
+    const reqYear = req.query.year !== undefined ? parseInt(req.query.year) : null;
+    const revenueDate = (reqMonth !== null && reqYear !== null)
+      ? new Date(reqYear, reqMonth, 1)
+      : new Date();
+
+    const cacheKey = `dashboard_${req.user._id}_${revenueDate.getFullYear()}_${revenueDate.getMonth()}`;
 
     // 🔥 Check cache first
     const cachedData = cache.get(cacheKey);
@@ -29,8 +36,9 @@ router.get('/', auth, async (req, res) => {
     sevenDaysFromNow.setDate(now.getDate() + 7);
 
     // Use local month boundaries; inclusive start, exclusive end.
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
+    // Use the requested month/year for revenue calculation
+    const monthStart = new Date(revenueDate.getFullYear(), revenueDate.getMonth(), 1, 0, 0, 0, 0);
+    const monthEnd = new Date(revenueDate.getFullYear(), revenueDate.getMonth() + 1, 1, 0, 0, 0, 0);
 
     // 🔥 Run all DB queries in parallel
     const [
