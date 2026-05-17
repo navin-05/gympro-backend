@@ -97,6 +97,9 @@ const startServer = async () => {
   try {
     await connectDB();
 
+    // Start scheduled cron jobs (after DB is connected)
+    require('./cron/membershipCron');
+
     app.listen(PORT, () => {
       console.log(`\n🏋️ Gym Management API running on port ${PORT}`);
       console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);

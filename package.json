@@ -11,7 +11,7 @@
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dns": "^0.2.2",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "expo": "^55.0.10",
     "express": "^4.21.0",
     "express-rate-limit": "^8.3.2",
@@ -19,7 +19,9 @@
     "mongodb-memory-server": "^10.0.0",
     "mongoose": "^8.6.0",
     "node-cache": "^5.1.2",
+    "node-cron": "^4.2.1",
     "qrcode": "^1.5.4",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "twilio": "^6.0.2"
   }
 }

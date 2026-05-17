@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const router = express.Router();
 const Member = require('../models/Member');
 const auth = require('../middleware/auth');
+const { sendWhatsAppMessage } = require('../services/whatsappService');
 
 // Helper to classify members into expiring / expired based on expiryDate
 const classifyMembersByExpiry = (members) => {
@@ -108,36 +109,61 @@ router.post('/generate', auth, async (req, res) => {
     console.log('TOTAL MEMBERS FOUND:', members.length);
     console.log('FIRST MEMBER:', members[0]);
 
-    if (!members || members.length === 0) {
-      return res.json({
-        success: true,
-        debug: 'No members found for this user',
-        userId: req.user._id,
-        expiringCount: 0,
-        expiredCount: 0,
-        expiring: [],
-        expired: []
-      });
-    }
-
-    console.log('EXPIRY TYPE:', typeof members[0]?.expiryDate);
-    console.log('EXPIRY VALUE:', members[0]?.expiryDate);
-
-    const { expiring, expired } = classifyMembersByExpiry(members);
+    const { expiring, expired } = (!members || members.length === 0)
+      ? { expiring: [], expired: [] }
+      : classifyMembersByExpiry(members);
 
     console.log('FINAL EXPIRING:', expiring.length);
     console.log('FINAL EXPIRED:', expired.length);
 
-    return res.json({
-      success: true,
-      expiringCount: expiring.length,
-      expiredCount: expired.length,
-      expiring,
-      expired
-    });
+    // Build WhatsApp message
+    const notificationTo = process.env.GYM_NOTIFICATION_WHATSAPP;
+    if (!notificationTo) {
+      return res.json({ success: false, message: 'GYM_NOTIFICATION_WHATSAPP not configured' });
+    }
+
+    let whatsAppMessage;
+
+    if (expiring.length === 0 && expired.length === 0) {
+      whatsAppMessage = 'No expiring or expired memberships found.';
+    } else {
+      whatsAppMessage = '🏋️ *GymPro Membership Alert*\n';
+
+      if (expiring.length > 0) {
+        whatsAppMessage += '\n📅 *Expiring Soon:*\n';
+        for (const m of expiring) {
+          const d = Number(m.daysLeft);
+          const label = d === 0 ? 'expires today'
+            : d === 1 ? 'expires tomorrow'
+            : `${d} days left`;
+          whatsAppMessage += `• ${m.name} - ${m.mobile || 'N/A'} - ${label}\n`;
+        }
+      }
+
+      if (expired.length > 0) {
+        whatsAppMessage += '\n❌ *Expired Members:*\n';
+        for (const m of expired) {
+          const abs = Math.abs(Number(m.daysLeft));
+          const label = abs === 0 ? 'expired today'
+            : abs === 1 ? 'expired 1 day ago'
+            : `expired ${abs} days ago`;
+          whatsAppMessage += `• ${m.name} - ${m.mobile || 'N/A'} - ${label}\n`;
+        }
+      }
+
+      whatsAppMessage += `\n📊 Total: ${expiring.length} expiring soon, ${expired.length} expired`;
+    }
+
+    const result = await sendWhatsAppMessage(notificationTo, whatsAppMessage);
+
+    if (result) {
+      return res.json({ success: true, message: 'WhatsApp notification sent successfully' });
+    } else {
+      return res.json({ success: false, message: 'Failed to send WhatsApp notification' });
+    }
   } catch (error) {
     console.error('ERROR IN POST /api/notifications/generate:', error);
-    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
+    return res.status(500).json({ success: false, message: error.message || 'Internal server error' });
   }
 });
 
