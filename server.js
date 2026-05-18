@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const rateLimit = require('express-rate-limit');
 const { connectDB } = require('./config/db');
 const enquiryRoutes = require('./routes/enquiryRoutes');
+const { triggerScheduledNotificationsIfDue } = require('./utils/triggerScheduledNotifications');
 
 // Load environment variables
 dotenv.config();
@@ -12,8 +13,9 @@ dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
-// Lightweight health (no /api prefix) for probes
+// Lightweight health (no /api prefix) for probes — also wakes schedule check on Render
 app.get('/health', (req, res) => {
+  triggerScheduledNotificationsIfDue('health').catch(() => {});
   res.json({ success: true });
 });
 
@@ -81,6 +83,7 @@ app.use('/api/enquiries', enquiryRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
+  triggerScheduledNotificationsIfDue('api-health').catch(() => {});
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -104,6 +107,7 @@ const startServer = async () => {
 
     // Start scheduled cron jobs (after DB is connected)
     require('./cron/membershipCron');
+    triggerScheduledNotificationsIfDue('startup').catch(() => {});
 
     app.listen(PORT, () => {
       console.log(`\n🏋️ Gym Management API running on port ${PORT}`);

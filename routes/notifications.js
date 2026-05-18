@@ -97,6 +97,9 @@ router.put('/automation', auth, async (req, res) => {
     req.user.notificationSettings.lastNotificationSentDate = null;
     await req.user.save();
 
+    const { triggerScheduledNotificationsIfDue } = require('../utils/triggerScheduledNotifications');
+    triggerScheduledNotificationsIfDue('automation-save').catch(() => {});
+
     // #region agent log
     const { debugTrace } = require('../utils/debugTrace');
     debugTrace('notifications.js:automation', '[AUTOMATION SAVED]', {
