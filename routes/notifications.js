@@ -10,6 +10,8 @@ const {
 const {
   parseScheduledTime12h,
   formatScheduledTimeForStorage,
+  normalizeTimezone,
+  normalizeScheduledHourMinute,
 } = require('../utils/notificationScheduleTime');
 
 // GET /api/notifications
@@ -59,34 +61,48 @@ router.get('/', auth, async (req, res) => {
 // PUT /api/notifications/automation — WhatsApp automation schedule (per user)
 router.put('/automation', auth, async (req, res) => {
   try {
-    const { enabled, scheduledTime } = req.body;
+    const { enabled, scheduledHour, scheduledMinute, scheduledTime, timezone } = req.body;
 
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'enabled must be a boolean' });
     }
-    if (typeof scheduledTime !== 'string' || !scheduledTime.trim()) {
-      return res.status(400).json({ error: 'scheduledTime is required' });
+
+    let hourMinute = normalizeScheduledHourMinute(scheduledHour, scheduledMinute);
+    if (!hourMinute && typeof scheduledTime === 'string' && scheduledTime.trim()) {
+      const parsed = parseScheduledTime12h(scheduledTime);
+      if (parsed) {
+        hourMinute = { hour: parsed.hour24, minute: parsed.minute };
+      }
+    }
+    if (!hourMinute) {
+      return res.status(400).json({
+        error: 'scheduledHour and scheduledMinute (0–23, 0–59) are required',
+      });
     }
 
-    const parsed = parseScheduledTime12h(scheduledTime);
-    if (!parsed) {
-      return res.status(400).json({ error: 'Invalid scheduledTime. Use format hh:mm AM/PM' });
-    }
-
-    const normalized = formatScheduledTimeForStorage(parsed.hour24, parsed.minute);
+    const normalizedTz = normalizeTimezone(
+      typeof timezone === 'string' ? timezone : undefined
+    );
+    const displayTime = formatScheduledTimeForStorage(hourMinute.hour, hourMinute.minute);
 
     if (!req.user.notificationSettings) {
       req.user.notificationSettings = {};
     }
     req.user.notificationSettings.enabled = enabled;
-    req.user.notificationSettings.scheduledTime = normalized;
+    req.user.notificationSettings.scheduledHour = hourMinute.hour;
+    req.user.notificationSettings.scheduledMinute = hourMinute.minute;
+    req.user.notificationSettings.scheduledTime = displayTime;
+    req.user.notificationSettings.timezone = normalizedTz;
     await req.user.save();
 
     return res.json({
       success: true,
       notificationSettings: {
         enabled: req.user.notificationSettings.enabled,
+        scheduledHour: req.user.notificationSettings.scheduledHour,
+        scheduledMinute: req.user.notificationSettings.scheduledMinute,
         scheduledTime: req.user.notificationSettings.scheduledTime,
+        timezone: req.user.notificationSettings.timezone,
         lastNotificationSentDate: req.user.notificationSettings.lastNotificationSentDate ?? null,
       },
     });

@@ -50,6 +50,23 @@ const userSchema = new mongoose.Schema({
       default: '09:00 PM',
       trim: true
     },
+    scheduledHour: {
+      type: Number,
+      default: 21,
+      min: 0,
+      max: 23
+    },
+    scheduledMinute: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 59
+    },
+    timezone: {
+      type: String,
+      default: 'UTC',
+      trim: true
+    },
     lastNotificationSentDate: {
       type: String,
       default: null

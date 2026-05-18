@@ -1,18 +1,17 @@
 const User = require('../models/User');
 const { generateAndSendMembershipExpiryWhatsApp } = require('../services/membershipExpiryNotificationService');
 const {
-  parseScheduledTime12h,
-  getLocalDateKey,
-  serverLocalTimeMatchesSchedule,
+  getDateKeyInTimezone,
+  resolveScheduleFromNotificationSettings,
+  cronTimeMatchesUserSchedule,
 } = require('../utils/notificationScheduleTime');
 
 /**
- * Global once-per-minute tick: users with automation enabled whose scheduled
- * server-local time matches "now" receive the same WhatsApp flow as manual Generate.
+ * Global once-per-minute tick: compare UTC "now" → user timezone wall clock
+ * against stored scheduledHour / scheduledMinute (numeric only).
  */
 async function runScheduledUserNotificationsJob() {
   const now = new Date();
-  const todayKey = getLocalDateKey(now);
 
   let users;
   try {
@@ -31,15 +30,10 @@ async function runScheduledUserNotificationsJob() {
   for (const u of users) {
     try {
       const ns = u.notificationSettings || {};
-      const rawTime = ns.scheduledTime && String(ns.scheduledTime).trim()
-        ? String(ns.scheduledTime).trim()
-        : '09:00 PM';
-      const parsed = parseScheduledTime12h(rawTime);
-      if (!parsed) {
-        console.log('[ScheduledNotify] Skip user (invalid time):', u._id);
-        continue;
-      }
-      if (!serverLocalTimeMatchesSchedule(now, parsed)) {
+      const { scheduledHour, scheduledMinute, timezone } = resolveScheduleFromNotificationSettings(ns);
+      const todayKey = getDateKeyInTimezone(now, timezone);
+
+      if (!cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timezone)) {
         continue;
       }
       if (ns.lastNotificationSentDate === todayKey) {
