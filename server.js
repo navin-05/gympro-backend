@@ -12,6 +12,11 @@ dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
+// Lightweight health (no /api prefix) for probes
+app.get('/health', (req, res) => {
+  res.json({ success: true });
+});
+
 // ✅ RATE LIMITER (GLOBAL) — OPTIONS excluded: CORS preflight must not burn the budget
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
