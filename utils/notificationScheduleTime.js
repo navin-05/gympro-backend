@@ -206,11 +206,10 @@ function resolveScheduleFromNotificationSettings(ns) {
   return { scheduledHour: 21, scheduledMinute: 0, timezone };
 }
 
-const SCHEDULE_MATCH_GRACE_MINUTES = 5;
-
 /**
  * Cron match: wall-clock in user TZ (numbers only).
- * Allows a short grace window so a delayed tick (e.g. cold start) still fires once per day.
+ * Fires at or after scheduled minute within the same local hour (handles late cron ticks).
+ * Duplicate same-day sends are prevented by wasNotificationSentToday.
  */
 function cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timeZone) {
   const target = normalizeScheduledHourMinute(scheduledHour, scheduledMinute);
@@ -221,12 +220,7 @@ function cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timeZo
   if (current.hour !== target.hour) {
     return false;
   }
-  const currentTotalMin = current.hour * 60 + current.minute;
-  const scheduledTotalMin = target.hour * 60 + target.minute;
-  return (
-    currentTotalMin >= scheduledTotalMin
-    && currentTotalMin < scheduledTotalMin + SCHEDULE_MATCH_GRACE_MINUTES
-  );
+  return current.minute >= target.minute;
 }
 
 module.exports = {

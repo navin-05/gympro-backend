@@ -17,8 +17,9 @@ const scheduledHour = 21;
 const scheduledMinute = 0;
 
 const day1 = new Date('2026-05-18T15:30:00.000Z'); // 9:00 PM IST
+const day1LateWake = new Date('2026-05-18T16:15:00.000Z'); // 9:45 PM IST
 const day2 = new Date('2026-05-19T15:30:00.000Z');
-const day2Late = new Date('2026-05-19T15:33:00.000Z'); // 9:03 PM IST (grace)
+const day2SameHourRetry = new Date('2026-05-19T15:35:00.000Z'); // 9:05 PM IST
 
 let lastSent = null;
 
@@ -40,9 +41,14 @@ function tick(label, now) {
   return wouldSend;
 }
 
+// Late wake only (server missed 9:00 exact tick)
+tick('late-wake-only-9:45pm', day1LateWake);
+
+lastSent = null;
 tick('day1-9pm', day1);
 tick('day1-9pm-retry-same-day', day1);
+tick('day1-9:45pm-after-sent', day1LateWake);
 tick('day2-9pm', day2);
-tick('day2-9:03pm-grace', day2Late);
+tick('day2-9:05pm-same-hour-retry', day2SameHourRetry);
 
 console.log('Verification complete. See debug-caa0a5.log');
