@@ -40,9 +40,12 @@ function formatScheduledTimeForStorage(hour24, minute) {
 
 /** @returns {{ hour: number, minute: number } | null} */
 function normalizeScheduledHourMinute(hour, minute) {
-  const h = Number(hour);
-  const m = Number(minute);
-  if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+  if (hour === undefined || hour === null || minute === undefined || minute === null) {
+    return null;
+  }
+  const h = Math.floor(Number(hour));
+  const m = Math.floor(Number(minute));
+  if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) {
     return null;
   }
   return { hour: h, minute: m };
@@ -114,10 +117,55 @@ function getZonedTimeParts(date, timeZone) {
   }
 }
 
-/** Calendar date in the user's timezone (duplicate-send guard). */
+/** Calendar date in the user's timezone (YYYY-MM-DD). */
 function getDateKeyInTimezone(date, timeZone) {
-  const p = getZonedTimeParts(date, timeZone);
-  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  const tz = normalizeTimezone(timeZone);
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  } catch {
+    const p = getZonedTimeParts(date, timeZone);
+    return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  }
+}
+
+/**
+ * Normalize stored lastNotificationSentDate to YYYY-MM-DD in user's timezone.
+ * Handles legacy string, ISO datetime, and Date object values.
+ */
+function normalizeLastSentDateKey(value, timeZone) {
+  if (value == null || value === '') {
+    return null;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return trimmed;
+    }
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      return getDateKeyInTimezone(parsed, timeZone);
+    }
+    return null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return getDateKeyInTimezone(value, timeZone);
+  }
+  return null;
+}
+
+/** True only if a notification was already recorded for this user's local calendar day. */
+function wasNotificationSentToday(lastSent, now, timeZone) {
+  const lastKey = normalizeLastSentDateKey(lastSent, timeZone);
+  if (!lastKey) {
+    return false;
+  }
+  const todayKey = getDateKeyInTimezone(now, timeZone);
+  return lastKey === todayKey;
 }
 
 /**
@@ -170,6 +218,8 @@ module.exports = {
   normalizeTimezone,
   getZonedTimeParts,
   getDateKeyInTimezone,
+  normalizeLastSentDateKey,
+  wasNotificationSentToday,
   resolveScheduleFromNotificationSettings,
   cronTimeMatchesUserSchedule,
 };

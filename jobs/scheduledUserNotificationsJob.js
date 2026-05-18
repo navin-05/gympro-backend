@@ -4,6 +4,7 @@ const {
   getDateKeyInTimezone,
   resolveScheduleFromNotificationSettings,
   cronTimeMatchesUserSchedule,
+  wasNotificationSentToday,
 } = require('../utils/notificationScheduleTime');
 
 /**
@@ -31,14 +32,15 @@ async function runScheduledUserNotificationsJob() {
     try {
       const ns = u.notificationSettings || {};
       const { scheduledHour, scheduledMinute, timezone } = resolveScheduleFromNotificationSettings(ns);
-      const todayKey = getDateKeyInTimezone(now, timezone);
 
       if (!cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timezone)) {
         continue;
       }
-      if (ns.lastNotificationSentDate === todayKey) {
+      if (wasNotificationSentToday(ns.lastNotificationSentDate, now, timezone)) {
         continue;
       }
+
+      const todayKey = getDateKeyInTimezone(now, timezone);
 
       const outcome = await generateAndSendMembershipExpiryWhatsApp(u._id, {
         skipEmptySend: true,
@@ -54,7 +56,7 @@ async function runScheduledUserNotificationsJob() {
 
       if (outcome.code === 'SENT' || outcome.code === 'SKIPPED_EMPTY') {
         await User.updateOne(
-          { _id: u._id },
+          { _id: u._id, 'notificationSettings.lastNotificationSentDate': { $ne: todayKey } },
           { $set: { 'notificationSettings.lastNotificationSentDate': todayKey } }
         );
       }
