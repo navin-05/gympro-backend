@@ -57,6 +57,14 @@ app.options("*", cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Wake schedule check on normal API traffic (Render cold start + daily app use)
+app.use((req, res, next) => {
+  if (req.method !== 'OPTIONS' && req.path.startsWith('/api/') && req.path !== '/api/health') {
+    triggerScheduledNotificationsIfDue('api-traffic').catch(() => {});
+  }
+  next();
+});
+
 // 🔥 Apply strict limiter only to auth routes
 app.use('/api/auth', authLimiter, require('./routes/auth'));
 

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const LOG_PATH = path.join(__dirname, '..', '..', 'debug-caa0a5.log');
+const ALT_LOG_PATH = path.join(__dirname, '..', '..', '.cursor', 'debug-caa0a5.log');
 const INGEST = 'http://127.0.0.1:7436/ingest/5a101aa9-c48e-4af0-8939-73dc44d4c0e8';
 const SESSION_ID = 'caa0a5';
 
@@ -17,8 +18,14 @@ function debugTrace(location, message, data = {}, hypothesisId = '') {
     data,
     hypothesisId,
   };
+  const line = `${JSON.stringify(payload)}\n`;
   try {
-    fs.appendFileSync(LOG_PATH, `${JSON.stringify(payload)}\n`);
+    fs.appendFileSync(LOG_PATH, line);
+  } catch {
+    // ignore file errors
+  }
+  try {
+    fs.appendFileSync(ALT_LOG_PATH, line);
   } catch {
     // ignore file errors
   }
