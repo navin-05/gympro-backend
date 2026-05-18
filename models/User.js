@@ -39,7 +39,22 @@ const userSchema = new mongoose.Schema({
       type: String,
       required: true
     }
-  }]
+  }],
+  notificationSettings: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    scheduledTime: {
+      type: String,
+      default: '09:00 PM',
+      trim: true
+    },
+    lastNotificationSentDate: {
+      type: String,
+      default: null
+    }
+  }
 }, {
   timestamps: true
 });
