@@ -165,7 +165,15 @@ function wasNotificationSentToday(lastSent, now, timeZone) {
     return false;
   }
   const todayKey = getDateKeyInTimezone(now, timeZone);
-  return lastKey === todayKey;
+  // New local calendar day → allow send again
+  if (lastKey < todayKey) {
+    return false;
+  }
+  // Stale/future stored date → do not block
+  if (lastKey > todayKey) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -198,8 +206,11 @@ function resolveScheduleFromNotificationSettings(ns) {
   return { scheduledHour: 21, scheduledMinute: 0, timezone };
 }
 
+const SCHEDULE_MATCH_GRACE_MINUTES = 5;
+
 /**
- * Cron match: compare current wall-clock in user TZ (numbers only).
+ * Cron match: wall-clock in user TZ (numbers only).
+ * Allows a short grace window so a delayed tick (e.g. cold start) still fires once per day.
  */
 function cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timeZone) {
   const target = normalizeScheduledHourMinute(scheduledHour, scheduledMinute);
@@ -207,7 +218,15 @@ function cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timeZo
     return false;
   }
   const current = getZonedTimeParts(now, timeZone);
-  return current.hour === target.hour && current.minute === target.minute;
+  if (current.hour !== target.hour) {
+    return false;
+  }
+  const currentTotalMin = current.hour * 60 + current.minute;
+  const scheduledTotalMin = target.hour * 60 + target.minute;
+  return (
+    currentTotalMin >= scheduledTotalMin
+    && currentTotalMin < scheduledTotalMin + SCHEDULE_MATCH_GRACE_MINUTES
+  );
 }
 
 module.exports = {

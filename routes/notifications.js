@@ -93,7 +93,22 @@ router.put('/automation', auth, async (req, res) => {
     req.user.notificationSettings.scheduledMinute = hourMinute.minute;
     req.user.notificationSettings.scheduledTime = displayTime;
     req.user.notificationSettings.timezone = normalizedTz;
+    // Reset daily guard so a new/changed schedule is not blocked by a prior send date
+    req.user.notificationSettings.lastNotificationSentDate = null;
     await req.user.save();
+
+    // #region agent log
+    const { debugTrace } = require('../utils/debugTrace');
+    debugTrace('notifications.js:automation', '[AUTOMATION SAVED]', {
+      userId: String(req.user._id),
+      enabled,
+      scheduledHour: hourMinute.hour,
+      scheduledMinute: hourMinute.minute,
+      timezone: normalizedTz,
+      displayTime,
+      lastNotificationSentDate: req.user.notificationSettings.lastNotificationSentDate ?? null,
+    }, 'J');
+    // #endregion
 
     return res.json({
       success: true,

@@ -2,10 +2,13 @@ const User = require('../models/User');
 const { generateAndSendMembershipExpiryWhatsApp } = require('../services/membershipExpiryNotificationService');
 const {
   getDateKeyInTimezone,
+  getZonedTimeParts,
   resolveScheduleFromNotificationSettings,
   cronTimeMatchesUserSchedule,
   wasNotificationSentToday,
+  normalizeLastSentDateKey,
 } = require('../utils/notificationScheduleTime');
+const { debugTrace } = require('../utils/debugTrace');
 
 /**
  * Global once-per-minute tick: compare UTC "now" → user timezone wall clock
@@ -21,8 +24,18 @@ async function runScheduledUserNotificationsJob() {
       .lean();
   } catch (error) {
     console.error('[ScheduledNotify] Failed to load users:', error.message);
+    // #region agent log
+    debugTrace('scheduledUserNotificationsJob.js:fetch', '[USER FETCH FAILED]', { error: error.message }, 'D');
+    // #endregion
     return;
   }
+
+  // #region agent log
+  debugTrace('scheduledUserNotificationsJob.js:fetch', '[USER FETCHED]', {
+    enabledCount: users?.length ?? 0,
+    utc: now.toISOString(),
+  }, 'D');
+  // #endregion
 
   if (!users || users.length === 0) {
     return;
@@ -32,19 +45,70 @@ async function runScheduledUserNotificationsJob() {
     try {
       const ns = u.notificationSettings || {};
       const { scheduledHour, scheduledMinute, timezone } = resolveScheduleFromNotificationSettings(ns);
-
-      if (!cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timezone)) {
-        continue;
-      }
-      if (wasNotificationSentToday(ns.lastNotificationSentDate, now, timezone)) {
-        continue;
-      }
-
+      const zonedNow = getZonedTimeParts(now, timezone);
       const todayKey = getDateKeyInTimezone(now, timezone);
+      const lastKey = normalizeLastSentDateKey(ns.lastNotificationSentDate, timezone);
+      const timeMatch = cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timezone);
+      const alreadySentToday = wasNotificationSentToday(ns.lastNotificationSentDate, now, timezone);
+
+      // Log when at scheduled minute OR duplicate-guard would block at scheduled time
+      if (timeMatch || zonedNow.hour === scheduledHour) {
+        // #region agent log
+        debugTrace('scheduledUserNotificationsJob.js:decision', '[SCHEDULE CHECK]', {
+          userId: String(u._id),
+          utc: now.toISOString(),
+          timezone,
+          stored: {
+            scheduledHour: ns.scheduledHour,
+            scheduledMinute: ns.scheduledMinute,
+            scheduledTime: ns.scheduledTime,
+            timezone: ns.timezone,
+            lastNotificationSentDate: ns.lastNotificationSentDate,
+            lastNotificationSentDateType: ns.lastNotificationSentDate == null
+              ? 'null'
+              : typeof ns.lastNotificationSentDate,
+          },
+          resolved: { scheduledHour, scheduledMinute, timezone },
+          userLocalNow: { hour: zonedNow.hour, minute: zonedNow.minute, dateKey: todayKey },
+          lastSentNormalized: lastKey,
+          timeMatch,
+          alreadySentToday,
+        }, timeMatch ? 'C' : 'C');
+        // #endregion
+      }
+
+      if (!timeMatch) {
+        continue;
+      }
+      if (alreadySentToday) {
+        // #region agent log
+        debugTrace('scheduledUserNotificationsJob.js:skip', '[SKIPPED - ALREADY SENT TODAY]', {
+          userId: String(u._id),
+          lastKey,
+          todayKey,
+          rawLastSent: ns.lastNotificationSentDate,
+        }, 'B');
+        // #endregion
+        continue;
+      }
+
+      // #region agent log
+      debugTrace('scheduledUserNotificationsJob.js:send', '[WHATSAPP SEND START]', {
+        userId: String(u._id),
+        todayKey,
+      }, 'G');
+      // #endregion
 
       const outcome = await generateAndSendMembershipExpiryWhatsApp(u._id, {
         skipEmptySend: true,
       });
+
+      // #region agent log
+      debugTrace('scheduledUserNotificationsJob.js:outcome', '[WHATSAPP OUTCOME]', {
+        userId: String(u._id),
+        code: outcome.code,
+      }, 'G');
+      // #endregion
 
       if (outcome.code === 'NO_ENV') {
         continue;
@@ -55,13 +119,28 @@ async function runScheduledUserNotificationsJob() {
       }
 
       if (outcome.code === 'SENT' || outcome.code === 'SKIPPED_EMPTY') {
-        await User.updateOne(
-          { _id: u._id, 'notificationSettings.lastNotificationSentDate': { $ne: todayKey } },
+        const updateResult = await User.updateOne(
+          { _id: u._id },
           { $set: { 'notificationSettings.lastNotificationSentDate': todayKey } }
         );
+        // #region agent log
+        debugTrace('scheduledUserNotificationsJob.js:update', '[LAST SENT DATE UPDATE]', {
+          userId: String(u._id),
+          todayKey,
+          matchedCount: updateResult.matchedCount,
+          modifiedCount: updateResult.modifiedCount,
+          outcomeCode: outcome.code,
+        }, 'E');
+        // #endregion
       }
     } catch (error) {
       console.error('[ScheduledNotify] User tick error:', u._id, error.message);
+      // #region agent log
+      debugTrace('scheduledUserNotificationsJob.js:userError', '[USER TICK ERROR]', {
+        userId: String(u._id),
+        error: error.message,
+      }, 'F');
+      // #endregion
     }
   }
 }

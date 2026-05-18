@@ -14,10 +14,19 @@ cron.schedule('0 9 * * *', async () => {
 
 // Per-user automated WhatsApp: single global job, server-local time match
 cron.schedule('* * * * *', async () => {
+  // #region agent log
+  const { debugTrace } = require('../utils/debugTrace');
+  debugTrace('membershipCron.js:tick', '[CRON RUNNING] per-minute tick', {
+    utc: new Date().toISOString(),
+  }, 'A');
+  // #endregion
   try {
     await runScheduledUserNotificationsJob();
   } catch (error) {
     console.error(`[Cron] Scheduled user notifications failed: ${error.message}`);
+    // #region agent log
+    debugTrace('membershipCron.js:error', '[CRON TICK ERROR]', { error: error.message }, 'F');
+    // #endregion
   }
 });
 
