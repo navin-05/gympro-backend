@@ -12,6 +12,7 @@ function getClient() {
         dataPath: './.wwebjs_auth',
       }),
       puppeteer: {
+        executablePath: '/opt/render/.cache/puppeteer/chrome/linux-148.0.7778.167/chrome-linux64/chrome',
         headless: true,
         args: [
           '--no-sandbox',
