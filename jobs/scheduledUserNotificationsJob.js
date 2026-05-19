@@ -92,6 +92,12 @@ async function runScheduledUserNotificationsJob() {
         continue;
       }
 
+      console.log('[WA-NUM-DEBUG] Scheduled send — user notificationSettings:', JSON.stringify({
+        userId: String(u._id),
+        whatsappNotificationNumber: ns.whatsappNotificationNumber ?? null,
+        enabled: ns.enabled,
+      }));
+
       // #region agent log
       debugTrace('scheduledUserNotificationsJob.js:send', '[WHATSAPP SEND START]', {
         userId: String(u._id),

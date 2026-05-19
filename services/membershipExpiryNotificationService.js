@@ -111,10 +111,20 @@ async function generateAndSendMembershipExpiryWhatsApp(ownerId, options = {}) {
   const owner = await User.findById(ownerObjectId)
     .select('notificationSettings')
     .lean();
+
+  console.log('[WA-NUM-DEBUG] Automation fetch user:', JSON.stringify({
+    ownerId: String(ownerObjectId),
+    notificationSettings: owner?.notificationSettings ?? null,
+    whatsappNotificationNumber: owner?.notificationSettings?.whatsappNotificationNumber ?? null,
+  }));
+
   const notificationTo = resolveOwnerWhatsAppRecipient(owner?.notificationSettings);
   if (!notificationTo) {
+    console.log('[WA-NUM-DEBUG] NO_RECIPIENT — could not resolve number from notificationSettings');
     return { code: 'NO_RECIPIENT' };
   }
+
+  console.log('[WA-NUM-DEBUG] Recipient resolved for send:', notificationTo);
 
   const members = await Member.find({ owner: ownerObjectId }).lean();
 

@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const Member = require('../models/Member');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
 const {
   classifyMembersByExpiry,
@@ -75,6 +76,8 @@ function normalizeWhatsAppNotificationNumber(input) {
 // PUT /api/notifications/automation — WhatsApp automation schedule (per user)
 router.put('/automation', auth, async (req, res) => {
   try {
+    console.log('[WA-NUM-DEBUG] PUT /notifications/automation body:', JSON.stringify(req.body));
+
     const {
       enabled,
       scheduledHour,
@@ -123,7 +126,22 @@ router.put('/automation', auth, async (req, res) => {
     }
     // Reset daily guard so a new/changed schedule is not blocked by a prior send date
     req.user.notificationSettings.lastNotificationSentDate = null;
+
+    console.log('[WA-NUM-DEBUG] DB update payload (notificationSettings):', JSON.stringify({
+      enabled: req.user.notificationSettings.enabled,
+      scheduledHour: req.user.notificationSettings.scheduledHour,
+      scheduledMinute: req.user.notificationSettings.scheduledMinute,
+      scheduledTime: req.user.notificationSettings.scheduledTime,
+      timezone: req.user.notificationSettings.timezone,
+      whatsappNotificationNumber: req.user.notificationSettings.whatsappNotificationNumber ?? null,
+      lastNotificationSentDate: req.user.notificationSettings.lastNotificationSentDate,
+    }));
+
+    req.user.markModified('notificationSettings');
     await req.user.save();
+
+    const savedUser = await User.findById(req.user._id).select('notificationSettings').lean();
+    console.log('[WA-NUM-DEBUG] Saved user document (notificationSettings):', JSON.stringify(savedUser?.notificationSettings ?? null));
 
     const { triggerScheduledNotificationsIfDue } = require('../utils/triggerScheduledNotifications');
     triggerScheduledNotificationsIfDue('automation-save').catch(() => {});
@@ -141,16 +159,18 @@ router.put('/automation', auth, async (req, res) => {
     }, 'J');
     // #endregion
 
+    const persistedSettings = savedUser?.notificationSettings ?? req.user.notificationSettings;
+
     return res.json({
       success: true,
       notificationSettings: {
-        enabled: req.user.notificationSettings.enabled,
-        scheduledHour: req.user.notificationSettings.scheduledHour,
-        scheduledMinute: req.user.notificationSettings.scheduledMinute,
-        scheduledTime: req.user.notificationSettings.scheduledTime,
-        timezone: req.user.notificationSettings.timezone,
-        whatsappNotificationNumber: req.user.notificationSettings.whatsappNotificationNumber ?? null,
-        lastNotificationSentDate: req.user.notificationSettings.lastNotificationSentDate ?? null,
+        enabled: persistedSettings.enabled,
+        scheduledHour: persistedSettings.scheduledHour,
+        scheduledMinute: persistedSettings.scheduledMinute,
+        scheduledTime: persistedSettings.scheduledTime,
+        timezone: persistedSettings.timezone,
+        whatsappNotificationNumber: persistedSettings.whatsappNotificationNumber ?? null,
+        lastNotificationSentDate: persistedSettings.lastNotificationSentDate ?? null,
       },
     });
   } catch (error) {

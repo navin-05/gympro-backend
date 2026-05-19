@@ -28,6 +28,8 @@ async function sendWhatsAppMessage(to, message) {
       return null;
     }
 
+    console.log('[WA-NUM-DEBUG] client.sendMessage recipient:', { to: sanitizedTo, chatId });
+
     await initializeWhatsAppClient();
     if (!isWhatsAppReady()) {
       console.error('[WhatsApp] Client not ready');
