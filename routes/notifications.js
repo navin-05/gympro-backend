@@ -58,10 +58,31 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
+function normalizeWhatsAppNotificationNumber(input) {
+  if (input == null || input === '') {
+    return null;
+  }
+  const digits = String(input).replace(/\D/g, '');
+  if (digits.length === 10) {
+    return digits;
+  }
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return digits.slice(2);
+  }
+  return null;
+}
+
 // PUT /api/notifications/automation — WhatsApp automation schedule (per user)
 router.put('/automation', auth, async (req, res) => {
   try {
-    const { enabled, scheduledHour, scheduledMinute, scheduledTime, timezone } = req.body;
+    const {
+      enabled,
+      scheduledHour,
+      scheduledMinute,
+      scheduledTime,
+      timezone,
+      whatsappNotificationNumber,
+    } = req.body;
 
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'enabled must be a boolean' });
@@ -93,6 +114,13 @@ router.put('/automation', auth, async (req, res) => {
     req.user.notificationSettings.scheduledMinute = hourMinute.minute;
     req.user.notificationSettings.scheduledTime = displayTime;
     req.user.notificationSettings.timezone = normalizedTz;
+    if (whatsappNotificationNumber !== undefined) {
+      const normalizedNumber = normalizeWhatsAppNotificationNumber(whatsappNotificationNumber);
+      if (whatsappNotificationNumber !== '' && whatsappNotificationNumber != null && !normalizedNumber) {
+        return res.status(400).json({ error: 'whatsappNotificationNumber must be a valid 10-digit Indian mobile number' });
+      }
+      req.user.notificationSettings.whatsappNotificationNumber = normalizedNumber;
+    }
     // Reset daily guard so a new/changed schedule is not blocked by a prior send date
     req.user.notificationSettings.lastNotificationSentDate = null;
     await req.user.save();
@@ -121,6 +149,7 @@ router.put('/automation', auth, async (req, res) => {
         scheduledMinute: req.user.notificationSettings.scheduledMinute,
         scheduledTime: req.user.notificationSettings.scheduledTime,
         timezone: req.user.notificationSettings.timezone,
+        whatsappNotificationNumber: req.user.notificationSettings.whatsappNotificationNumber ?? null,
         lastNotificationSentDate: req.user.notificationSettings.lastNotificationSentDate ?? null,
       },
     });
@@ -146,8 +175,8 @@ router.post('/generate', auth, async (req, res) => {
       skipEmptySend: false,
     });
 
-    if (result.code === 'NO_ENV') {
-      return res.json({ success: false, message: 'GYM_NOTIFICATION_WHATSAPP not configured' });
+    if (result.code === 'NO_RECIPIENT') {
+      return res.json({ success: false, message: 'WhatsApp notification number not configured' });
     }
     if (result.code === 'SENT') {
       return res.json({ success: true, message: 'WhatsApp notification sent successfully' });

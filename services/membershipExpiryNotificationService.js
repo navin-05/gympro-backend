@@ -1,6 +1,22 @@
 const mongoose = require('mongoose');
 const Member = require('../models/Member');
+const User = require('../models/User');
 const { sendWhatsAppMessage } = require('./whatsappService');
+
+function resolveOwnerWhatsAppRecipient(notificationSettings) {
+  const raw = notificationSettings?.whatsappNotificationNumber;
+  if (!raw || !String(raw).trim()) {
+    return null;
+  }
+  const digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 10) {
+    return `+91${digits}`;
+  }
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return `+${digits}`;
+  }
+  return null;
+}
 
 /**
  * Classify members into expiring (≤7 days) and expired vs today (local server date).
@@ -79,11 +95,11 @@ function buildWhatsAppMessage(expiring, expired) {
 }
 
 /**
- * Same pipeline as manual Generate: classify members for owner, build message, send via Twilio.
+ * Same pipeline as manual Generate: classify members for owner, build message, send via WhatsApp.
  *
  * @param {mongoose.Types.ObjectId|string} ownerId
  * @param {{ skipEmptySend?: boolean }} options - When true (scheduled automation), do not send if there is nothing to report.
- * @returns {Promise<{ code: string, twilioOk?: boolean }>}
+ * @returns {Promise<{ code: string, whatsappOk?: boolean }>}
  */
 async function generateAndSendMembershipExpiryWhatsApp(ownerId, options = {}) {
   const { skipEmptySend = false } = options;
@@ -92,16 +108,19 @@ async function generateAndSendMembershipExpiryWhatsApp(ownerId, options = {}) {
     ? ownerId
     : new mongoose.Types.ObjectId(String(ownerId));
 
+  const owner = await User.findById(ownerObjectId)
+    .select('notificationSettings')
+    .lean();
+  const notificationTo = resolveOwnerWhatsAppRecipient(owner?.notificationSettings);
+  if (!notificationTo) {
+    return { code: 'NO_RECIPIENT' };
+  }
+
   const members = await Member.find({ owner: ownerObjectId }).lean();
 
   const { expiring, expired } = (!members || members.length === 0)
     ? { expiring: [], expired: [] }
     : classifyMembersByExpiry(members);
-
-  const notificationTo = process.env.GYM_NOTIFICATION_WHATSAPP;
-  if (!notificationTo) {
-    return { code: 'NO_ENV' };
-  }
 
   if (expiring.length === 0 && expired.length === 0) {
     if (skipEmptySend) {
@@ -109,12 +128,12 @@ async function generateAndSendMembershipExpiryWhatsApp(ownerId, options = {}) {
     }
     const whatsAppMessage = buildWhatsAppMessage(expiring, expired);
     const result = await sendWhatsAppMessage(notificationTo, whatsAppMessage);
-    return { code: result ? 'SENT' : 'TWILIO_FAIL', twilioOk: !!result };
+    return { code: result ? 'SENT' : 'WHATSAPP_FAIL', whatsappOk: !!result };
   }
 
   const whatsAppMessage = buildWhatsAppMessage(expiring, expired);
   const result = await sendWhatsAppMessage(notificationTo, whatsAppMessage);
-  return { code: result ? 'SENT' : 'TWILIO_FAIL', twilioOk: !!result };
+  return { code: result ? 'SENT' : 'WHATSAPP_FAIL', whatsappOk: !!result };
 }
 
 module.exports = {

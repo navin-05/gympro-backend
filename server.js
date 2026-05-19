@@ -113,6 +113,11 @@ const startServer = async () => {
   try {
     await connectDB();
 
+    const { initializeWhatsAppClient } = require('./services/whatsappClient');
+    initializeWhatsAppClient().catch((err) => {
+      console.error('[WhatsApp] Startup initialization failed:', err.message);
+    });
+
     // Start scheduled cron jobs (after DB is connected)
     require('./cron/membershipCron');
     triggerScheduledNotificationsIfDue('startup').catch(() => {});

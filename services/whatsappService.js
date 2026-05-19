@@ -1,17 +1,18 @@
-const twilio = require('twilio');
+const { initializeWhatsAppClient, isWhatsAppReady, getClient } = require('./whatsappClient');
 
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
-const TWILIO_WHATSAPP_FROM = 'whatsapp:+14155238886';
+function toWhatsAppChatId(e164OrPlus) {
+  const digits = String(e164OrPlus).replace(/\D/g, '');
+  if (!digits) {
+    return null;
+  }
+  return `${digits}@c.us`;
+}
 
 /**
- * Send a WhatsApp message via Twilio sandbox.
+ * Send a WhatsApp message via the server admin whatsapp-web.js session.
  * @param {string} to - Recipient number in E.164 format (e.g. +919876543210)
  * @param {string} message - Message body
- * @returns {Promise<object|null>} Twilio message object or null on failure
+ * @returns {Promise<object|null>} Send result or null on failure
  */
 async function sendWhatsAppMessage(to, message) {
   try {
@@ -20,16 +21,22 @@ async function sendWhatsAppMessage(to, message) {
       return null;
     }
 
-    // Sanitize phone number — ensure it starts with +
     const sanitizedTo = to.startsWith('+') ? to : `+${to}`;
+    const chatId = toWhatsAppChatId(sanitizedTo);
+    if (!chatId) {
+      console.log('[WhatsApp] Skipped: invalid recipient');
+      return null;
+    }
 
-    const result = await client.messages.create({
-      from: TWILIO_WHATSAPP_FROM,
-      to: `whatsapp:${sanitizedTo}`,
-      body: message,
-    });
+    await initializeWhatsAppClient();
+    if (!isWhatsAppReady()) {
+      console.error('[WhatsApp] Client not ready');
+      return null;
+    }
 
-    console.log(`[WhatsApp] Message sent successfully | SID: ${result.sid}`);
+    const result = await getClient().sendMessage(chatId, message);
+    const messageId = result?.id?.id || result?.id || 'unknown';
+    console.log(`[WhatsApp] Message sent successfully | id: ${messageId}`);
     return result;
   } catch (error) {
     console.error(`[WhatsApp] Failed to send message: ${error.message}`);

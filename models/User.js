@@ -70,6 +70,11 @@ const userSchema = new mongoose.Schema({
     lastNotificationSentDate: {
       type: String,
       default: null
+    },
+    whatsappNotificationNumber: {
+      type: String,
+      default: null,
+      trim: true
     }
   }
 }, {

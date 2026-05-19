@@ -110,11 +110,11 @@ async function runScheduledUserNotificationsJob() {
       }, 'G');
       // #endregion
 
-      if (outcome.code === 'NO_ENV') {
+      if (outcome.code === 'NO_RECIPIENT') {
         continue;
       }
-      if (outcome.code === 'TWILIO_FAIL') {
-        console.log('[ScheduledNotify] Twilio failed for user:', u._id);
+      if (outcome.code === 'WHATSAPP_FAIL') {
+        console.log('[ScheduledNotify] WhatsApp send failed for user:', u._id);
         continue;
       }
 
