@@ -51,31 +51,32 @@ async function runScheduledUserNotificationsJob() {
       const timeMatch = cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timezone);
       const alreadySentToday = wasNotificationSentToday(ns.lastNotificationSentDate, now, timezone);
 
-      // Log when at scheduled minute OR duplicate-guard would block at scheduled time
-      if (timeMatch || zonedNow.hour === scheduledHour) {
-        // #region agent log
-        debugTrace('scheduledUserNotificationsJob.js:decision', '[SCHEDULE CHECK]', {
-          userId: String(u._id),
-          utc: now.toISOString(),
-          timezone,
-          stored: {
-            scheduledHour: ns.scheduledHour,
-            scheduledMinute: ns.scheduledMinute,
-            scheduledTime: ns.scheduledTime,
-            timezone: ns.timezone,
-            lastNotificationSentDate: ns.lastNotificationSentDate,
-            lastNotificationSentDateType: ns.lastNotificationSentDate == null
-              ? 'null'
-              : typeof ns.lastNotificationSentDate,
-          },
-          resolved: { scheduledHour, scheduledMinute, timezone },
-          userLocalNow: { hour: zonedNow.hour, minute: zonedNow.minute, dateKey: todayKey },
-          lastSentNormalized: lastKey,
-          timeMatch,
-          alreadySentToday,
-        }, timeMatch ? 'C' : 'C');
-        // #endregion
-      }
+      const scheduleDebug = {
+        userId: String(u._id),
+        utc: now.toISOString(),
+        timezone,
+        stored: {
+          scheduledHour: ns.scheduledHour,
+          scheduledMinute: ns.scheduledMinute,
+          scheduledTime: ns.scheduledTime,
+          timezone: ns.timezone,
+          lastNotificationSentDate: ns.lastNotificationSentDate,
+        },
+        resolved: { scheduledHour, scheduledMinute, timezone },
+        userLocalNow: {
+          hour: zonedNow.hour,
+          minute: zonedNow.minute,
+          dateKey: todayKey,
+        },
+        scheduledLocalTime: `${String(scheduledHour).padStart(2, '0')}:${String(scheduledMinute).padStart(2, '0')}`,
+        timeMatch,
+        alreadySentToday,
+        lastSentNormalized: lastKey,
+        willSend: timeMatch && !alreadySentToday,
+      };
+
+      console.log('[SCHEDULE CHECK]', JSON.stringify(scheduleDebug));
+      debugTrace('scheduledUserNotificationsJob.js:decision', '[SCHEDULE CHECK]', scheduleDebug, 'C');
 
       if (!timeMatch) {
         continue;
@@ -92,10 +93,11 @@ async function runScheduledUserNotificationsJob() {
         continue;
       }
 
-      console.log('[WA-NUM-DEBUG] Scheduled send — user notificationSettings:', JSON.stringify({
+      console.log('[WHATSAPP SEND START]', JSON.stringify({
         userId: String(u._id),
+        todayKey,
+        timeMatch,
         whatsappNotificationNumber: ns.whatsappNotificationNumber ?? null,
-        enabled: ns.enabled,
       }));
 
       // #region agent log

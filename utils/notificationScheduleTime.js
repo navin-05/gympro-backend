@@ -217,10 +217,15 @@ function cronTimeMatchesUserSchedule(now, scheduledHour, scheduledMinute, timeZo
     return false;
   }
   const current = getZonedTimeParts(now, timeZone);
-  if (current.hour !== target.hour) {
+  const currentHour = Number(current.hour);
+  const currentMinute = Number(current.minute);
+  if (Number.isNaN(currentHour) || Number.isNaN(currentMinute)) {
     return false;
   }
-  return current.minute >= target.minute;
+  if (currentHour !== target.hour) {
+    return false;
+  }
+  return currentMinute >= target.minute;
 }
 
 module.exports = {
