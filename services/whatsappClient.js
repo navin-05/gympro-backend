@@ -18,6 +18,25 @@ const STATE = {
   DISCONNECTED: 'disconnected',
 };
 
+/** Ready wait after QR — allow sync beyond authTimeoutMs without killing the process */
+const CLIENT_READY_TIMEOUT_MS = 300000;
+
+const PUPPETEER_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-accelerated-2d-canvas',
+  '--no-first-run',
+  '--no-zygote',
+  '--single-process',
+  '--disable-gpu',
+  '--disable-extensions',
+  '--disable-background-networking',
+  '--disable-sync',
+  '--metrics-recording-only',
+  '--disable-default-apps',
+];
+
 let client = null;
 let state = STATE.IDLE;
 let initPromise = null;
@@ -31,35 +50,53 @@ function isWhatsAppReady() {
   return state === STATE.READY && client != null;
 }
 
+function isBrowserCrashError(err) {
+  const msg = String(err?.message || err || '');
+  return /Target closed|Session closed|Protocol error|Browser closed|crashed/i.test(msg);
+}
+
 function attachClientEvents(c) {
   c.on('qr', async (qr) => {
-    console.log('[WhatsApp] QR RECEIVED (auth state: awaiting scan)');
-    console.log('[WhatsApp] Scan QR with the admin WhatsApp account (first-time setup only):');
+    console.log('[WhatsApp] QR generated — scan with admin account (first-time setup only)');
     try {
       console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
     } catch (err) {
-      console.log('[WhatsApp] QR received (open logs if terminal QR fails):', err.message);
+      console.log('[WhatsApp] QR terminal render failed:', err.message);
     }
   });
 
+  c.on('code', () => {
+    console.log('[WhatsApp] QR scanned — pairing code flow started');
+  });
+
+  c.on('loading_screen', (percent, message) => {
+    console.log('[WhatsApp] QR scanned / auth sync in progress:', percent, message || '');
+  });
+
   c.on('authenticated', () => {
-    console.log('[WhatsApp] Auth state: authenticated');
+    console.log('[WhatsApp] Auth completion: authenticated (sync may still be running)');
   });
 
   c.on('ready', () => {
     state = STATE.READY;
-    console.log('[WhatsApp] Client ready');
-    console.log('[WhatsApp] Client ready — automated messages can be sent');
+    console.log('[WhatsApp] Client ready state: ready — automated messages can be sent');
   });
 
   c.on('auth_failure', (msg) => {
     state = STATE.FAILED;
-    console.error('[WhatsApp] Auth state: failed —', msg);
+    console.error('[WhatsApp] Auth timeout/failure reason:', msg);
+  });
+
+  c.on('change_state', (waState) => {
+    console.log('[WhatsApp] Auth state change:', waState);
   });
 
   c.on('disconnected', (reason) => {
     state = STATE.DISCONNECTED;
-    console.log('[WhatsApp] Auth state: disconnected —', reason);
+    console.log('[WhatsApp] Disconnected:', reason);
+    if (isBrowserCrashError(reason)) {
+      console.error('[WhatsApp] Browser crash detected (disconnect):', reason);
+    }
     console.log('[WhatsApp] Shared client offline; restart server to re-initialize (no auto-relaunch)');
   });
 }
@@ -88,27 +125,21 @@ function createClient(executablePath) {
     authStrategy: new LocalAuth({
       dataPath: './.wwebjs_auth',
     }),
-    authTimeoutMs: 120000,
+    authTimeoutMs: 180000,
+    webVersionCache: {
+      type: 'none',
+    },
     puppeteer: {
       executablePath,
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-      ],
+      args: PUPPETEER_ARGS,
     },
   });
 }
 
 function runStartupInitialization() {
   return (async () => {
-    console.log('[WhatsApp] Initializing client (startup, single global instance)...');
+    console.log('[WhatsApp] Initialization start (single global instance, background)');
 
     const executablePath = await resolvePuppeteerExecutablePath();
 
@@ -116,7 +147,7 @@ function runStartupInitialization() {
       client = createClient(executablePath);
       attachClientEvents(client);
     } else {
-      console.log('[WhatsApp] Reusing existing browser instance (duplicate create prevented)');
+      console.log('[WhatsApp] Duplicate browser create prevented — reusing instance');
     }
 
     if (state === STATE.READY) {
@@ -124,25 +155,41 @@ function runStartupInitialization() {
       return client;
     }
 
-    await new Promise((resolve, reject) => {
-      const readyTimeout = setTimeout(() => {
-        state = STATE.FAILED;
-        reject(new Error('WhatsApp client ready timeout'));
-      }, 180000);
+    try {
+      await new Promise((resolve, reject) => {
+        const readyTimeout = setTimeout(() => {
+          state = STATE.FAILED;
+          const err = new Error('WhatsApp client ready timeout after auth/sync window');
+          console.error('[WhatsApp] Auth timeout reason (ready):', err.message);
+          reject(err);
+        }, CLIENT_READY_TIMEOUT_MS);
 
-      const onReady = () => {
-        clearTimeout(readyTimeout);
-        state = STATE.READY;
-        resolve(client);
-      };
+        const onReady = () => {
+          clearTimeout(readyTimeout);
+          state = STATE.READY;
+          resolve(client);
+        };
 
-      client.once('ready', onReady);
-      client.initialize().catch((err) => {
-        clearTimeout(readyTimeout);
-        state = STATE.FAILED;
-        reject(err);
+        client.once('ready', onReady);
+        client.initialize().catch((err) => {
+          clearTimeout(readyTimeout);
+          state = STATE.FAILED;
+          if (isBrowserCrashError(err)) {
+            console.error('[WhatsApp] Browser crash detected (initialize):', err.message);
+          }
+          if (/auth|timeout|Timeout/i.test(String(err.message))) {
+            console.error('[WhatsApp] Auth timeout reason (initialize):', err.message);
+          }
+          reject(err);
+        });
       });
-    });
+    } catch (error) {
+      console.error(
+        '[WhatsApp] Initialization failed (non-fatal, server continues):',
+        error.message
+      );
+      return null;
+    }
 
     return client;
   })();
@@ -163,13 +210,16 @@ function startWhatsAppClient() {
 
   initPromise = runStartupInitialization()
     .then((c) => {
-      console.log('[WhatsApp] Startup initialization completed, state:', state);
+      console.log('[WhatsApp] Startup initialization finished, state:', state);
       return c;
     })
     .catch((err) => {
       state = STATE.FAILED;
-      console.error('[WhatsApp] Startup initialization failed:', err.message);
-      throw err;
+      console.error(
+        '[WhatsApp] Startup initialization error (non-fatal, server continues):',
+        err?.message || err
+      );
+      return null;
     });
 
   return initPromise;

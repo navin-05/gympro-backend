@@ -10,6 +10,10 @@ const { triggerScheduledNotificationsIfDue } = require('./utils/triggerScheduled
 // Load environment variables
 dotenv.config();
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[UnhandledRejection]', reason);
+});
+
 const app = express();
 app.set('trust proxy', 1);
 
