@@ -1,4 +1,13 @@
 const fs = require('fs');
+const path = require('path');
+
+const RENDER_PERSISTENT_CHROME_CACHE = '/opt/render/project/.chrome-cache';
+
+// Use persistent project cache on Render (not ephemeral /opt/render/.cache/puppeteer)
+if (!process.env.PUPPETEER_CACHE_DIR && fs.existsSync('/opt/render/project')) {
+  process.env.PUPPETEER_CACHE_DIR = RENDER_PERSISTENT_CHROME_CACHE;
+}
+
 const QRCode = require('qrcode');
 const puppeteer = require('puppeteer');
 const { Client, LocalAuth } = require('whatsapp-web.js');
@@ -40,26 +49,23 @@ function attachClientEvents(c) {
   });
 }
 
-function buildPuppeteerOptions(executablePath) {
-  const options = {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu',
-    ],
-  };
+async function resolvePuppeteerExecutablePath() {
+  console.log('[WhatsApp] PUPPETEER_CACHE_DIR:', process.env.PUPPETEER_CACHE_DIR || '(default)');
 
-  if (executablePath) {
-    options.executablePath = executablePath;
+  const executablePath = await puppeteer.executablePath();
+  const binaryExists = fs.existsSync(executablePath);
+
+  console.log('[WhatsApp] Resolved executablePath:', executablePath);
+  console.log('[WhatsApp] Chrome binary exists:', binaryExists);
+
+  if (!binaryExists) {
+    throw new Error(
+      `Chrome binary not found at ${executablePath}. `
+      + 'Run: PUPPETEER_CACHE_DIR=/opt/render/project/.chrome-cache npx puppeteer browsers install chrome'
+    );
   }
 
-  return options;
+  return executablePath;
 }
 
 function createClient(executablePath) {
@@ -67,23 +73,21 @@ function createClient(executablePath) {
     authStrategy: new LocalAuth({
       dataPath: './.wwebjs_auth',
     }),
-    puppeteer: buildPuppeteerOptions(executablePath),
+    puppeteer: {
+      executablePath,
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+      ],
+    },
   });
-}
-
-async function resolvePuppeteerExecutablePath() {
-  const executablePath = await puppeteer.executablePath();
-  console.log('[WhatsApp] Resolved executablePath:', executablePath);
-
-  if (fs.existsSync(executablePath)) {
-    console.log('[WhatsApp] Chrome binary found at resolved executablePath');
-    return executablePath;
-  }
-
-  console.warn(
-    '[WhatsApp] Chrome binary missing at resolved executablePath; launching without explicit path'
-  );
-  return undefined;
 }
 
 function getClient() {
