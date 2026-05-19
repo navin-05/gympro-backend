@@ -1,4 +1,9 @@
-const { initializeWhatsAppClient, isWhatsAppReady, getClient } = require('./whatsappClient');
+const {
+  getClient,
+  getWhatsAppState,
+  isWhatsAppReady,
+  waitForWhatsAppReady,
+} = require('./whatsappClient');
 
 function toWhatsAppChatId(e164OrPlus) {
   const digits = String(e164OrPlus).replace(/\D/g, '');
@@ -10,6 +15,7 @@ function toWhatsAppChatId(e164OrPlus) {
 
 /**
  * Send a WhatsApp message via the server admin whatsapp-web.js session.
+ * Reuses the global client initialized at startup — does not launch Chromium here.
  * @param {string} to - Recipient number in E.164 format (e.g. +919876543210)
  * @param {string} message - Message body
  * @returns {Promise<object|null>} Send result or null on failure
@@ -28,13 +34,21 @@ async function sendWhatsAppMessage(to, message) {
       return null;
     }
 
-    console.log('[WA-NUM-DEBUG] client.sendMessage recipient:', { to: sanitizedTo, chatId });
+    console.log('[WhatsApp] sendMessage called | state:', getWhatsAppState(), '| to:', sanitizedTo);
 
-    await initializeWhatsAppClient();
     if (!isWhatsAppReady()) {
-      console.error('[WhatsApp] Client not ready');
-      return null;
+      const ready = await waitForWhatsAppReady(8000);
+      if (!ready) {
+        console.error(
+          '[WhatsApp] Client not ready for send — state:',
+          getWhatsAppState(),
+          '(startup init must complete first; no browser launch from send path)'
+        );
+        return null;
+      }
     }
+
+    console.log('[WA-NUM-DEBUG] client.sendMessage recipient:', { to: sanitizedTo, chatId });
 
     const result = await getClient().sendMessage(chatId, message);
     const messageId = result?.id?.id || result?.id || 'unknown';

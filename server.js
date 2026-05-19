@@ -113,9 +113,12 @@ const startServer = async () => {
   try {
     await connectDB();
 
-    const { initializeWhatsAppClient } = require('./services/whatsappClient');
-    initializeWhatsAppClient().catch((err) => {
-      console.error('[WhatsApp] Startup initialization failed:', err.message);
+    // WhatsApp: single global init in background (never from routes/cron/send)
+    const { startWhatsAppClient } = require('./services/whatsappClient');
+    setImmediate(() => {
+      startWhatsAppClient().catch((err) => {
+        console.error('[WhatsApp] Startup initialization failed:', err.message);
+      });
     });
 
     // Start scheduled cron jobs (after DB is connected)
