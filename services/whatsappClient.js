@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 
 const RENDER_PERSISTENT_CHROME_CACHE = '/opt/render/project/.chrome-cache';
 
@@ -9,6 +10,31 @@ if (!process.env.PUPPETEER_CACHE_DIR && fs.existsSync('/opt/render/project')) {
 const QRCode = require('qrcode');
 const puppeteer = require('puppeteer');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+
+const DEBUG_INGEST = 'http://127.0.0.1:7436/ingest/5a101aa9-c48e-4af0-8939-73dc44d4c0e8';
+const DEBUG_SESSION_ID = 'da54d2';
+function debugLog({ runId, hypothesisId, location, message, data }) {
+  // #region agent log
+  try {
+    fetch(DEBUG_INGEST, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': DEBUG_SESSION_ID,
+      },
+      body: JSON.stringify({
+        sessionId: DEBUG_SESSION_ID,
+        runId,
+        hypothesisId,
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+  } catch (_) {}
+  // #endregion
+}
 
 const STATE = {
   IDLE: 'idle',
@@ -25,22 +51,17 @@ const PUPPETEER_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
-  '--disable-accelerated-2d-canvas',
-  '--no-first-run',
-  '--no-zygote',
-  '--single-process',
   '--disable-gpu',
-  '--disable-extensions',
-  '--disable-background-networking',
-  '--disable-sync',
-  '--metrics-recording-only',
-  '--disable-default-apps',
+  '--single-process',
+  '--no-zygote',
 ];
 
 let client = null;
 let state = STATE.IDLE;
 let initPromise = null;
 let startupInitStarted = false;
+
+const AUTH_DIR = path.resolve(__dirname, '..', '.wwebjs_auth');
 
 function getWhatsAppState() {
   return state;
@@ -58,6 +79,13 @@ function isBrowserCrashError(err) {
 function attachClientEvents(c) {
   c.on('qr', async (qr) => {
     console.log('[WhatsApp] QR generated — scan with admin account (first-time setup only)');
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'B',
+      location: 'backend/services/whatsappClient.js:qr',
+      message: 'QR generated',
+      data: { state, authDir: AUTH_DIR, cwd: process.cwd(), rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+    });
     try {
       console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
     } catch (err) {
@@ -71,20 +99,48 @@ function attachClientEvents(c) {
 
   c.on('loading_screen', (percent, message) => {
     console.log('[WhatsApp] QR scanned / auth sync in progress:', percent, message || '');
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'A',
+      location: 'backend/services/whatsappClient.js:loading_screen',
+      message: 'Loading screen progress',
+      data: { percent, message: message || '', rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+    });
   });
 
   c.on('authenticated', () => {
     console.log('[WhatsApp] Auth completion: authenticated (sync may still be running)');
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'B',
+      location: 'backend/services/whatsappClient.js:authenticated',
+      message: 'Authenticated event fired',
+      data: { authDir: AUTH_DIR, cwd: process.cwd() },
+    });
   });
 
   c.on('ready', () => {
     state = STATE.READY;
     console.log('[WhatsApp] Client ready state: ready — automated messages can be sent');
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'B',
+      location: 'backend/services/whatsappClient.js:ready',
+      message: 'Ready event fired',
+      data: { state, authDir: AUTH_DIR, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+    });
   });
 
   c.on('auth_failure', (msg) => {
     state = STATE.FAILED;
     console.error('[WhatsApp] Auth timeout/failure reason:', msg);
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'E',
+      location: 'backend/services/whatsappClient.js:auth_failure',
+      message: 'Auth failure event fired',
+      data: { msg: String(msg || ''), state, authDir: AUTH_DIR },
+    });
   });
 
   c.on('change_state', (waState) => {
@@ -94,6 +150,13 @@ function attachClientEvents(c) {
   c.on('disconnected', (reason) => {
     state = STATE.DISCONNECTED;
     console.log('[WhatsApp] Disconnected:', reason);
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'C',
+      location: 'backend/services/whatsappClient.js:disconnected',
+      message: 'Disconnected event fired',
+      data: { reason: String(reason || ''), state, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+    });
     if (isBrowserCrashError(reason)) {
       console.error('[WhatsApp] Browser crash detected (disconnect):', reason);
     }
@@ -123,8 +186,9 @@ async function resolvePuppeteerExecutablePath() {
 function createClient(executablePath) {
   return new Client({
     authStrategy: new LocalAuth({
-      dataPath: './.wwebjs_auth',
+      dataPath: AUTH_DIR,
     }),
+    qrMaxRetries: 2,
     authTimeoutMs: 180000,
     webVersionCache: {
       type: 'none',
@@ -140,6 +204,35 @@ function createClient(executablePath) {
 function runStartupInitialization() {
   return (async () => {
     console.log('[WhatsApp] Initialization start (single global instance, background)');
+    debugLog({
+      runId: 'pre-fix',
+      hypothesisId: 'B',
+      location: 'backend/services/whatsappClient.js:runStartupInitialization',
+      message: 'Startup init begin',
+      data: { cwd: process.cwd(), authDir: AUTH_DIR, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+    });
+
+    // #region agent log
+    try {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+      fs.accessSync(AUTH_DIR, fs.constants.R_OK | fs.constants.W_OK);
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'B',
+        location: 'backend/services/whatsappClient.js:authDirAccess',
+        message: 'Auth dir ok (read/write)',
+        data: { authDir: AUTH_DIR },
+      });
+    } catch (e) {
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'B',
+        location: 'backend/services/whatsappClient.js:authDirAccess',
+        message: 'Auth dir NOT writable/readable',
+        data: { authDir: AUTH_DIR, error: String(e?.message || e || '') },
+      });
+    }
+    // #endregion
 
     const executablePath = await resolvePuppeteerExecutablePath();
 
@@ -174,6 +267,13 @@ function runStartupInitialization() {
         client.initialize().catch((err) => {
           clearTimeout(readyTimeout);
           state = STATE.FAILED;
+          debugLog({
+            runId: 'pre-fix',
+            hypothesisId: isBrowserCrashError(err) ? 'C' : 'D',
+            location: 'backend/services/whatsappClient.js:initialize.catch',
+            message: 'initialize() rejected',
+            data: { error: String(err?.message || err || ''), state },
+          });
           if (isBrowserCrashError(err)) {
             console.error('[WhatsApp] Browser crash detected (initialize):', err.message);
           }
@@ -188,6 +288,13 @@ function runStartupInitialization() {
         '[WhatsApp] Initialization failed (non-fatal, server continues):',
         error.message
       );
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: isBrowserCrashError(error) ? 'C' : 'D',
+        location: 'backend/services/whatsappClient.js:runStartupInitialization.catch',
+        message: 'Startup initialization failed',
+        data: { error: String(error?.message || error || ''), state },
+      });
       return null;
     }
 
@@ -207,6 +314,46 @@ function startWhatsAppClient() {
   startupInitStarted = true;
   state = STATE.INITIALIZING;
   console.log('[WhatsApp] Startup initialization scheduled (background)');
+  // #region agent log
+  try {
+    process.once('SIGTERM', () => {
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'A',
+        location: 'backend/services/whatsappClient.js:process.SIGTERM',
+        message: 'Process received SIGTERM',
+        data: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+      });
+    });
+    process.once('SIGINT', () => {
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'A',
+        location: 'backend/services/whatsappClient.js:process.SIGINT',
+        message: 'Process received SIGINT',
+        data: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+      });
+    });
+    process.once('exit', (code) => {
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'A',
+        location: 'backend/services/whatsappClient.js:process.exit',
+        message: 'Process exit',
+        data: { code, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
+      });
+    });
+    process.once('uncaughtException', (err) => {
+      debugLog({
+        runId: 'pre-fix',
+        hypothesisId: 'A',
+        location: 'backend/services/whatsappClient.js:process.uncaughtException',
+        message: 'Uncaught exception',
+        data: { error: String(err?.message || err || '') },
+      });
+    });
+  } catch (_) {}
+  // #endregion
 
   initPromise = runStartupInitialization()
     .then((c) => {
