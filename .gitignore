@@ -3,4 +3,4 @@ node_modules
 .wwebjs_auth
 .wwebjs_cache
 .chrome-cache
-# baileys_auth
+baileys_auth
