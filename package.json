@@ -6,9 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "render-build": "PUPPETEER_CACHE_DIR=/opt/render/project/.chrome-cache npx puppeteer browsers install chrome"
+    "render-build": "npm install"
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.19",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dns": "^0.2.2",
@@ -21,9 +22,8 @@
     "mongoose": "^8.6.0",
     "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
-    "puppeteer": "24.38.0",
     "qrcode": "^1.5.4",
-    "socket.io": "^4.8.3",
-    "whatsapp-web.js": "^1.34.7"
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3"
   }
 }
