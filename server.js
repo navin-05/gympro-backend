@@ -130,15 +130,21 @@ const startServer = async () => {
 
     // WhatsApp: single global init in background (never from routes/cron/send)
     const { startWhatsAppClient } = require('./services/whatsappClient');
-    setImmediate(() => {
-      startWhatsAppClient().catch((err) => {
+    setImmediate(async () => {
+      try {
+        await startWhatsAppClient();
+      } catch (err) {
         console.error('[WhatsApp] Startup initialization failed:', err.message);
-      });
+      }
     });
 
-    // Start scheduled cron jobs (after DB is connected)
-    require('./cron/membershipCron');
-    triggerScheduledNotificationsIfDue('startup').catch(() => {});
+    // STEP 6 — Delay scheduler startup (WhatsApp warmup on low-memory VPS)
+    setTimeout(() => {
+      console.log('[Scheduler] Starting after WhatsApp warmup...');
+      // Start scheduled cron jobs (after DB is connected)
+      require('./cron/membershipCron');
+      triggerScheduledNotificationsIfDue('startup').catch(() => {});
+    }, 45000);
 
     app.listen(PORT, () => {
       console.log(`\n🏋️ Gym Management API running on port ${PORT}`);

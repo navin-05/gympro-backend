@@ -1,9 +1,4 @@
-const {
-  getClient,
-  getWhatsAppState,
-  isWhatsAppReady,
-  waitForWhatsAppReady,
-} = require('./whatsappClient');
+const { getClient, isWhatsAppReady } = require('./whatsappClient');
 
 function toWhatsAppChatId(e164OrPlus) {
   const digits = String(e164OrPlus).replace(/\D/g, '');
@@ -22,6 +17,12 @@ function toWhatsAppChatId(e164OrPlus) {
  */
 async function sendWhatsAppMessage(to, message) {
   try {
+    // STEP 5 — block sends before ready
+    if (!isWhatsAppReady()) {
+      console.log('[WhatsApp] Client not ready yet');
+      return false;
+    }
+
     if (!to || !message) {
       console.log('[WhatsApp] Skipped: missing recipient or message');
       return null;
@@ -34,19 +35,7 @@ async function sendWhatsAppMessage(to, message) {
       return null;
     }
 
-    console.log('[WhatsApp] sendMessage called | state:', getWhatsAppState(), '| to:', sanitizedTo);
-
-    if (!isWhatsAppReady()) {
-      const ready = await waitForWhatsAppReady(8000);
-      if (!ready) {
-        console.error(
-          '[WhatsApp] Client not ready for send — state:',
-          getWhatsAppState(),
-          '(startup init must complete first; no browser launch from send path)'
-        );
-        return null;
-      }
-    }
+    console.log('[WhatsApp] sendMessage called | to:', sanitizedTo);
 
     console.log('[WA-NUM-DEBUG] client.sendMessage recipient:', { to: sanitizedTo, chatId });
 
