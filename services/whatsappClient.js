@@ -14,6 +14,7 @@ const http = require('http');
 
 const DEBUG_INGEST = 'http://127.0.0.1:7436/ingest/5a101aa9-c48e-4af0-8939-73dc44d4c0e8';
 const DEBUG_SESSION_ID = 'da54d2';
+const DEBUG_LOG_PATH = path.resolve(__dirname, '..', '..', '..', 'debug-da54d2.log');
 function debugLog({ runId, hypothesisId, location, message, data }) {
   // #region agent log
   try {
@@ -26,6 +27,12 @@ function debugLog({ runId, hypothesisId, location, message, data }) {
       data,
       timestamp: Date.now(),
     });
+
+    // Always write a local NDJSON line as fallback (works on VPS too).
+    try {
+      fs.appendFileSync(DEBUG_LOG_PATH, `${payload}\n`, 'utf8');
+    } catch (_) {}
+
     const u = new URL(DEBUG_INGEST);
     const req = http.request(
       {
@@ -76,6 +83,34 @@ let initPromise = null;
 let startupInitStarted = false;
 
 const AUTH_DIR = path.resolve(__dirname, '..', '.wwebjs_auth');
+const AUTH_LOCKFILE = path.join(AUTH_DIR, 'session', 'lockfile');
+
+function tryCleanupStaleAuthLockfile() {
+  // #region agent log
+  try {
+    if (fs.existsSync(AUTH_LOCKFILE)) {
+      try {
+        fs.rmSync(AUTH_LOCKFILE, { force: true });
+        debugLog({
+          runId: 'pre-fix',
+          hypothesisId: 'B',
+          location: 'backend/services/whatsappClient.js:tryCleanupStaleAuthLockfile',
+          message: 'Removed stale auth lockfile (best-effort)',
+          data: { lockfile: AUTH_LOCKFILE },
+        });
+      } catch (e) {
+        debugLog({
+          runId: 'pre-fix',
+          hypothesisId: 'B',
+          location: 'backend/services/whatsappClient.js:tryCleanupStaleAuthLockfile',
+          message: 'Failed to remove auth lockfile (best-effort)',
+          data: { lockfile: AUTH_LOCKFILE, error: String(e?.message || e || '') },
+        });
+      }
+    }
+  } catch (_) {}
+  // #endregion
+}
 
 function getWhatsAppState() {
   return state;
@@ -247,6 +282,7 @@ function runStartupInitialization() {
       });
     }
     // #endregion
+    tryCleanupStaleAuthLockfile();
 
     const executablePath = await resolvePuppeteerExecutablePath();
 

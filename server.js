@@ -14,6 +14,17 @@ process.on('unhandledRejection', (reason) => {
   console.error('[UnhandledRejection]', reason);
 });
 
+process.on('uncaughtException', (err) => {
+  const msg = String(err?.message || err || '');
+  // WhatsApp LocalAuth sometimes throws EBUSY while unlinking lockfile; avoid hard crash/restart loop.
+  if (/EBUSY/i.test(msg) && /[\\\/]\.wwebjs_auth[\\\/]session[\\\/]lockfile/i.test(msg)) {
+    console.error('[UncaughtException][WhatsApp][Lockfile]', msg);
+    return;
+  }
+  console.error('[UncaughtException]', err);
+  process.exit(1);
+});
+
 const app = express();
 app.set('trust proxy', 1);
 
