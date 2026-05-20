@@ -10,28 +10,42 @@ if (!process.env.PUPPETEER_CACHE_DIR && fs.existsSync('/opt/render/project')) {
 const QRCode = require('qrcode');
 const puppeteer = require('puppeteer');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const http = require('http');
 
 const DEBUG_INGEST = 'http://127.0.0.1:7436/ingest/5a101aa9-c48e-4af0-8939-73dc44d4c0e8';
 const DEBUG_SESSION_ID = 'da54d2';
 function debugLog({ runId, hypothesisId, location, message, data }) {
   // #region agent log
   try {
-    fetch(DEBUG_INGEST, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Debug-Session-Id': DEBUG_SESSION_ID,
+    const payload = JSON.stringify({
+      sessionId: DEBUG_SESSION_ID,
+      runId,
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+    });
+    const u = new URL(DEBUG_INGEST);
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port || 80,
+        path: u.pathname + u.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'X-Debug-Session-Id': DEBUG_SESSION_ID,
+        },
       },
-      body: JSON.stringify({
-        sessionId: DEBUG_SESSION_ID,
-        runId,
-        hypothesisId,
-        location,
-        message,
-        data,
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
+      (res) => {
+        res.resume();
+      }
+    );
+    req.on('error', () => {});
+    req.write(payload);
+    req.end();
   } catch (_) {}
   // #endregion
 }
