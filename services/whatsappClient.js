@@ -24,6 +24,7 @@ const silentLogger = pino({ level: 'silent' });
 
 const DELIVERY_WARMUP_MS = 1200;
 const POST_CONNECT_WARMUP_MS = 5000;
+const PREVENTIVE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 const sendQueue = new PQueue({ concurrency: 1 });
 
@@ -40,6 +41,10 @@ let authState = null;
 let saveCreds = null;
 
 let reconnectTimer = null;
+let preventiveRefreshTimer = null;
+let preventiveRefreshTimerStarted = false;
+let preventiveRefreshInProgress = false;
+let socketConnectedAt = null;
 
 function authDir() {
   // Requirement: store auth session inside "/baileys_auth" (project-local)
@@ -80,6 +85,110 @@ function endExistingSocket() {
     // ignore teardown errors
   }
   sock = null;
+}
+
+function isSendQueueIdle() {
+  return sendQueue.pending === 0 && sendQueue.size === 0;
+}
+
+function getSocketUptimeMs() {
+  return socketConnectedAt ? Date.now() - socketConnectedAt : 0;
+}
+
+function getQueueState() {
+  return {
+    pending: sendQueue.pending,
+    size: sendQueue.size,
+    idle: isSendQueueIdle(),
+  };
+}
+
+function waitForWhatsAppReady(timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = () => {
+      if (isWhatsAppReady) return resolve();
+      if (Date.now() - started > timeoutMs) {
+        return reject(new Error('WhatsApp ready timeout after soft refresh'));
+      }
+      setTimeout(tick, 500);
+    };
+    tick();
+  });
+}
+
+function startPreventiveRefreshTimer() {
+  if (preventiveRefreshTimerStarted) return;
+  preventiveRefreshTimerStarted = true;
+
+  preventiveRefreshTimer = setInterval(() => {
+    runPreventiveSoftRefresh().catch((err) => {
+      console.log(
+        '[WhatsApp] Preventive soft refresh error (non-fatal):',
+        err?.message || err
+      );
+    });
+  }, PREVENTIVE_REFRESH_INTERVAL_MS);
+}
+
+async function runPreventiveSoftRefresh() {
+  const uptimeMs = getSocketUptimeMs();
+  const queueState = getQueueState();
+
+  if (!isSendQueueIdle()) {
+    console.log('[WhatsApp] Preventive soft refresh skipped (active send / queue busy):', {
+      socketUptimeMs: uptimeMs,
+      queueState,
+    });
+    return;
+  }
+
+  if (preventiveRefreshInProgress || socketInitializing || isConnecting) {
+    console.log('[WhatsApp] Preventive soft refresh skipped (lifecycle busy):', {
+      socketUptimeMs: uptimeMs,
+      queueState,
+      preventiveRefreshInProgress,
+      socketInitializing,
+      isConnecting,
+    });
+    return;
+  }
+
+  if (!sock) {
+    console.log('[WhatsApp] Preventive soft refresh skipped (no active socket):', {
+      socketUptimeMs: uptimeMs,
+      queueState,
+    });
+    return;
+  }
+
+  console.log('[WhatsApp] Preventive soft refresh starting', {
+    socketUptimeMs: uptimeMs,
+    queueState,
+  });
+
+  preventiveRefreshInProgress = true;
+  isWhatsAppReady = false;
+
+  try {
+    await clearReconnectTimer();
+    endExistingSocket();
+    await connectToWhatsApp();
+    await waitForWhatsAppReady();
+
+    console.log('[WhatsApp] Preventive soft refresh completed', {
+      socketUptimeMs: getSocketUptimeMs(),
+      queueState: getQueueState(),
+    });
+  } catch (err) {
+    console.log(
+      '[WhatsApp] Preventive soft refresh failed (non-fatal):',
+      err?.message || err
+    );
+    scheduleReconnect();
+  } finally {
+    preventiveRefreshInProgress = false;
+  }
 }
 
 async function connectToWhatsApp() {
@@ -140,11 +249,13 @@ async function connectToWhatsApp() {
       await clearReconnectTimer();
       isConnecting = false;
       socketInitializing = false;
+      socketConnectedAt = Date.now();
       console.log(hadSession ? '[WhatsApp] Session restored' : '[WhatsApp] Connected');
       console.log('[WhatsApp] Post-connect warmup (linked-device sync)...');
       await new Promise((r) => setTimeout(r, POST_CONNECT_WARMUP_MS));
       isWhatsAppReady = true;
       console.log('[WhatsApp] Ready for messaging');
+      startPreventiveRefreshTimer();
       return;
     }
 
@@ -157,6 +268,10 @@ async function connectToWhatsApp() {
       console.log('[WhatsApp] Disconnected');
       isConnecting = false;
       socketInitializing = false;
+
+      if (preventiveRefreshInProgress) {
+        return;
+      }
 
       if (!shouldReconnect) {
         // Logged out: do not spam reconnect. User must re-pair.
@@ -197,7 +312,7 @@ function getClient() {
 }
 
 async function startWhatsAppClient() {
-  if (isWhatsAppReady) return;
+  if (isWhatsAppReady || preventiveRefreshInProgress) return;
 
   try {
     await connectToWhatsApp();
