@@ -11,18 +11,19 @@ const {
   useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
 
+const {
+  installLibsignalLogGuards,
+  attachMessageSessionDiagnostics,
+  maybeRecoverBeforeSend,
+  noteSendSuccess,
+} = require('./signalSessionGuard');
+
+installLibsignalLogGuards();
+
 const silentLogger = pino({ level: 'silent' });
 
 const DELIVERY_WARMUP_MS = 1200;
 const POST_CONNECT_WARMUP_MS = 5000;
-
-// libsignal session rotation logs (e.g. "Closing session: SessionEntry") are internal only
-const _consoleInfo = console.info.bind(console);
-console.info = (...args) => {
-  const text = args.map((a) => String(a)).join(' ');
-  if (/Closing session:\s*SessionEntry/i.test(text)) return;
-  _consoleInfo(...args);
-};
 
 const sendQueue = new PQueue({ concurrency: 1 });
 
@@ -125,18 +126,7 @@ async function connectToWhatsApp() {
 
   s.ev.on('creds.update', saveCreds);
 
-  s.ev.on('messages.upsert', ({ messages }) => {
-    for (const msg of messages || []) {
-      if (!msg?.key?.fromMe) continue;
-      const hasDecryptStub = msg.messageStubType != null && !msg.message;
-      if (!hasDecryptStub) continue;
-      console.log('[WhatsApp][info] Self-echo decrypt/sync event (ignored, no lifecycle action):', {
-        id: msg.key?.id,
-        remoteJid: msg.key?.remoteJid,
-        stubType: msg.messageStubType,
-      });
-    }
-  });
+  attachMessageSessionDiagnostics(s);
 
   s.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update || {};
@@ -194,9 +184,11 @@ function getClient() {
       }
 
       return sendQueue.add(async () => {
+        await maybeRecoverBeforeSend(sock, jid);
         await sock.presenceSubscribe(jid);
         await new Promise((r) => setTimeout(r, DELIVERY_WARMUP_MS));
         const res = await sock.sendMessage(jid, { text: String(message ?? '') });
+        noteSendSuccess(jid);
         const id = res?.key?.id || res?.messageTimestamp || 'unknown';
         return { id: { id }, key: res?.key, _raw: res };
       });
