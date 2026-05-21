@@ -1,5 +1,7 @@
 const path = require('path');
 const qrcode = require('qrcode-terminal');
+const PQueue = require('p-queue').default;
+const pino = require('pino');
 
 const {
   default: makeWASocket,
@@ -9,12 +11,28 @@ const {
   useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
 
+const silentLogger = pino({ level: 'silent' });
+
+const DELIVERY_WARMUP_MS = 1200;
+const POST_CONNECT_WARMUP_MS = 5000;
+
+// libsignal session rotation logs (e.g. "Closing session: SessionEntry") are internal only
+const _consoleInfo = console.info.bind(console);
+console.info = (...args) => {
+  const text = args.map((a) => String(a)).join(' ');
+  if (/Closing session:\s*SessionEntry/i.test(text)) return;
+  _consoleInfo(...args);
+};
+
+const sendQueue = new PQueue({ concurrency: 1 });
+
 // Readiness flag (same external behavior as previous implementation)
 let isWhatsAppReady = false;
 
 // REQUIRED global state variables (auth/session safety)
 let sock = null;
 let isConnecting = false;
+let socketInitializing = false;
 
 // Internal auth refs (kept to preserve existing exported surface)
 let authState = null;
@@ -52,12 +70,29 @@ function scheduleReconnect() {
   }, 5000);
 }
 
+function endExistingSocket() {
+  if (!sock) return;
+  try {
+    sock.ev.removeAllListeners();
+    sock.end(undefined);
+  } catch (e) {
+    // ignore teardown errors
+  }
+  sock = null;
+}
+
 async function connectToWhatsApp() {
+  if (socketInitializing) {
+    console.log('[WhatsApp] Socket init already running');
+    return;
+  }
+
   if (isConnecting) {
     console.log('[WhatsApp] Connection already in progress');
     return;
   }
 
+  socketInitializing = true;
   isConnecting = true;
 
   console.log('[WhatsApp] Connecting...');
@@ -69,6 +104,11 @@ async function connectToWhatsApp() {
   const { version } = await fetchLatestBaileysVersion();
   const hadSession = !!authState?.creds?.registered;
 
+  endExistingSocket();
+
+  global.__SOCKET_CREATE_COUNT = (global.__SOCKET_CREATE_COUNT || 0) + 1;
+  console.log('SOCKET CREATED:', global.__SOCKET_CREATE_COUNT);
+
   const s = makeWASocket({
     version,
     auth: authState,
@@ -78,15 +118,23 @@ async function connectToWhatsApp() {
     markOnlineOnConnect: false, // lower chatter
     keepAliveIntervalMs: 25000,
     generateHighQualityLinkPreview: false,
+    logger: silentLogger,
   });
 
-  s.ev.on('creds.update', async () => {
-    try {
-      if (typeof saveCreds === 'function') {
-        await saveCreds();
-      }
-    } catch (e) {
-      console.error('[WhatsApp] Failed to persist auth state:', e?.message || e);
+  sock = s;
+
+  s.ev.on('creds.update', saveCreds);
+
+  s.ev.on('messages.upsert', ({ messages }) => {
+    for (const msg of messages || []) {
+      if (!msg?.key?.fromMe) continue;
+      const hasDecryptStub = msg.messageStubType != null && !msg.message;
+      if (!hasDecryptStub) continue;
+      console.log('[WhatsApp][info] Self-echo decrypt/sync event (ignored, no lifecycle action):', {
+        id: msg.key?.id,
+        remoteJid: msg.key?.remoteJid,
+        stubType: msg.messageStubType,
+      });
     }
   });
 
@@ -99,10 +147,14 @@ async function connectToWhatsApp() {
     }
 
     if (connection === 'open') {
-      isWhatsAppReady = true;
       await clearReconnectTimer();
       isConnecting = false;
+      socketInitializing = false;
       console.log(hadSession ? '[WhatsApp] Session restored' : '[WhatsApp] Connected');
+      console.log('[WhatsApp] Post-connect warmup (linked-device sync)...');
+      await new Promise((r) => setTimeout(r, POST_CONNECT_WARMUP_MS));
+      isWhatsAppReady = true;
+      console.log('[WhatsApp] Ready for messaging');
       return;
     }
 
@@ -114,6 +166,7 @@ async function connectToWhatsApp() {
 
       console.log('[WhatsApp] Disconnected');
       isConnecting = false;
+      socketInitializing = false;
 
       if (!shouldReconnect) {
         // Logged out: do not spam reconnect. User must re-pair.
@@ -139,9 +192,14 @@ function getClient() {
       if (!jid) {
         throw new Error('Invalid recipient chat id');
       }
-      const res = await sock.sendMessage(jid, { text: String(message ?? '') });
-      const id = res?.key?.id || res?.messageTimestamp || 'unknown';
-      return { id: { id }, key: res?.key, _raw: res };
+
+      return sendQueue.add(async () => {
+        await sock.presenceSubscribe(jid);
+        await new Promise((r) => setTimeout(r, DELIVERY_WARMUP_MS));
+        const res = await sock.sendMessage(jid, { text: String(message ?? '') });
+        const id = res?.key?.id || res?.messageTimestamp || 'unknown';
+        return { id: { id }, key: res?.key, _raw: res };
+      });
     },
   };
 }
@@ -150,11 +208,12 @@ async function startWhatsAppClient() {
   if (isWhatsAppReady) return;
 
   try {
-    sock = await connectToWhatsApp();
+    await connectToWhatsApp();
   } catch (err) {
     console.error('[WhatsApp] Startup initialization failed:', err?.message || err);
     isWhatsAppReady = false;
     isConnecting = false;
+    socketInitializing = false;
     scheduleReconnect();
   }
 }

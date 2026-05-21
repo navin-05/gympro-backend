@@ -10,7 +10,14 @@ const { triggerScheduledNotificationsIfDue } = require('./utils/triggerScheduled
 // Load environment variables
 dotenv.config();
 
+console.log('BACKEND PROCESS STARTED:', process.pid);
+
 process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '');
+  if (/Bad MAC|Failed to decrypt|SessionEntry|Closing session/i.test(msg)) {
+    console.log('[WhatsApp][info] Signal/decrypt rejection (ignored, no lifecycle action):', msg);
+    return;
+  }
   console.error('[UnhandledRejection]', reason);
 });
 
