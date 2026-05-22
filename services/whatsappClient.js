@@ -24,7 +24,10 @@ const silentLogger = pino({ level: 'silent' });
 
 const DELIVERY_WARMUP_MS = 1200;
 const POST_CONNECT_WARMUP_MS = 5000;
-const PREVENTIVE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const KEEPALIVE_INTERVAL_MS = 2.5 * 60 * 1000;
+const FALLBACK_REFRESH_INTERVAL_MS = 25 * 60 * 1000;
+const MIN_SOCKET_UPTIME_FOR_FALLBACK_MS = 20 * 60 * 1000;
+const MIN_IDLE_SINCE_SEND_FOR_FALLBACK_MS = 10 * 60 * 1000;
 
 const sendQueue = new PQueue({ concurrency: 1 });
 
@@ -41,10 +44,12 @@ let authState = null;
 let saveCreds = null;
 
 let reconnectTimer = null;
-let preventiveRefreshTimer = null;
-let preventiveRefreshTimerStarted = false;
+let keepaliveTimer = null;
+let fallbackRefreshTimer = null;
+let mdMaintenanceTimersStarted = false;
 let preventiveRefreshInProgress = false;
 let socketConnectedAt = null;
+let lastSendActivityAt = null;
 
 function authDir() {
   // Requirement: store auth session inside "/baileys_auth" (project-local)
@@ -117,34 +122,83 @@ function waitForWhatsAppReady(timeoutMs = 120000) {
   });
 }
 
-function startPreventiveRefreshTimer() {
-  if (preventiveRefreshTimerStarted) return;
-  preventiveRefreshTimerStarted = true;
+function getWsDiagnostics() {
+  const ws = sock?.ws;
+  return {
+    wsOpen: ws?.isOpen === true,
+    readyState: ws?.socket?.readyState ?? null,
+  };
+}
 
-  preventiveRefreshTimer = setInterval(() => {
+function msSinceLastSend() {
+  return lastSendActivityAt ? Date.now() - lastSendActivityAt : null;
+}
+
+async function runLightweightKeepalive() {
+  if (!sock || !isWhatsAppReady || preventiveRefreshInProgress) return;
+
+  const uptimeMs = getSocketUptimeMs();
+  const queueState = getQueueState();
+  const wsDiag = getWsDiagnostics();
+
+  try {
+    if (typeof sock.sendPresenceUpdate === 'function') {
+      await sock.sendPresenceUpdate('available');
+    }
+
+    const ws = sock.ws;
+    if (ws?.isOpen && ws.socket?.readyState === 1 && typeof ws.socket.ping === 'function') {
+      ws.socket.ping();
+    }
+
+    console.log('[WhatsApp] Lightweight keepalive sent', {
+      socketUptimeMs: uptimeMs,
+      queueState,
+      ...wsDiag,
+    });
+  } catch (err) {
+    console.log('[WhatsApp] Keepalive failed:', err?.message || err, {
+      socketUptimeMs: uptimeMs,
+      queueState,
+      ...wsDiag,
+    });
+  }
+}
+
+function startMdMaintenanceTimers() {
+  if (mdMaintenanceTimersStarted) return;
+  mdMaintenanceTimersStarted = true;
+
+  keepaliveTimer = setInterval(() => {
+    runLightweightKeepalive().catch(() => {});
+  }, KEEPALIVE_INTERVAL_MS);
+
+  fallbackRefreshTimer = setInterval(() => {
     runPreventiveSoftRefresh().catch((err) => {
       console.log(
-        '[WhatsApp] Preventive soft refresh error (non-fatal):',
+        '[WhatsApp] Fallback soft refresh error (non-fatal):',
         err?.message || err
       );
     });
-  }, PREVENTIVE_REFRESH_INTERVAL_MS);
+  }, FALLBACK_REFRESH_INTERVAL_MS);
 }
 
 async function runPreventiveSoftRefresh() {
   const uptimeMs = getSocketUptimeMs();
   const queueState = getQueueState();
+  const idleSinceSendMs = msSinceLastSend();
 
   if (!isSendQueueIdle()) {
-    console.log('[WhatsApp] Preventive soft refresh skipped (active send / queue busy):', {
+    console.log('[WhatsApp] Fallback soft refresh skipped (active send / queue busy):', {
       socketUptimeMs: uptimeMs,
       queueState,
+      idleSinceSendMs,
     });
     return;
   }
 
   if (preventiveRefreshInProgress || socketInitializing || isConnecting) {
-    console.log('[WhatsApp] Preventive soft refresh skipped (lifecycle busy):', {
+    console.log('[WhatsApp] Fallback soft refresh skipped (lifecycle busy):', {
       socketUptimeMs: uptimeMs,
       queueState,
       preventiveRefreshInProgress,
@@ -154,9 +208,32 @@ async function runPreventiveSoftRefresh() {
     return;
   }
 
-  if (!sock) {
-    console.log('[WhatsApp] Preventive soft refresh skipped (no active socket):', {
+  if (!sock || !isWhatsAppReady) {
+    console.log('[WhatsApp] Fallback soft refresh skipped (no active ready socket):', {
       socketUptimeMs: uptimeMs,
+      queueState,
+    });
+    return;
+  }
+
+  if (uptimeMs < MIN_SOCKET_UPTIME_FOR_FALLBACK_MS) {
+    console.log('[WhatsApp] Fallback soft refresh skipped (uptime too short):', {
+      socketUptimeMs: uptimeMs,
+      requiredUptimeMs: MIN_SOCKET_UPTIME_FOR_FALLBACK_MS,
+      queueState,
+    });
+    return;
+  }
+
+  if (
+    lastSendActivityAt &&
+    idleSinceSendMs !== null &&
+    idleSinceSendMs < MIN_IDLE_SINCE_SEND_FOR_FALLBACK_MS
+  ) {
+    console.log('[WhatsApp] Fallback soft refresh skipped (recent send activity):', {
+      socketUptimeMs: uptimeMs,
+      idleSinceSendMs,
+      requiredIdleMs: MIN_IDLE_SINCE_SEND_FOR_FALLBACK_MS,
       queueState,
     });
     return;
@@ -165,6 +242,8 @@ async function runPreventiveSoftRefresh() {
   console.log('[WhatsApp] Preventive soft refresh starting', {
     socketUptimeMs: uptimeMs,
     queueState,
+    idleSinceSendMs,
+    reason: 'rare-fallback',
   });
 
   preventiveRefreshInProgress = true;
@@ -179,10 +258,11 @@ async function runPreventiveSoftRefresh() {
     console.log('[WhatsApp] Preventive soft refresh completed', {
       socketUptimeMs: getSocketUptimeMs(),
       queueState: getQueueState(),
+      mode: 'rare-fallback',
     });
   } catch (err) {
     console.log(
-      '[WhatsApp] Preventive soft refresh failed (non-fatal):',
+      '[WhatsApp] Fallback soft refresh failed (non-fatal):',
       err?.message || err
     );
     scheduleReconnect();
@@ -255,7 +335,7 @@ async function connectToWhatsApp() {
       await new Promise((r) => setTimeout(r, POST_CONNECT_WARMUP_MS));
       isWhatsAppReady = true;
       console.log('[WhatsApp] Ready for messaging');
-      startPreventiveRefreshTimer();
+      startMdMaintenanceTimers();
       return;
     }
 
@@ -303,6 +383,7 @@ function getClient() {
         await sock.presenceSubscribe(jid);
         await new Promise((r) => setTimeout(r, DELIVERY_WARMUP_MS));
         const res = await sock.sendMessage(jid, { text: String(message ?? '') });
+        lastSendActivityAt = Date.now();
         noteSendSuccess(jid);
         const id = res?.key?.id || res?.messageTimestamp || 'unknown';
         return { id: { id }, key: res?.key, _raw: res };
