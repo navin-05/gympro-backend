@@ -1,6 +1,8 @@
 const { jidEncode, proto } = require('@whiskeysockets/baileys');
 
 const SESSION_RECOVERY_COOLDOWN_MS = 45000;
+const PRE_SEND_STABILIZATION_MS = 1500;
+const LONG_IDLE_MS = 60 * 60 * 1000;
 const sessionDiagnostics = new Map();
 
 const LIBSIGNAL_NOISE_RE =
@@ -170,6 +172,75 @@ async function maybeRecoverBeforeSend(sock, jid) {
   await lightweightSessionRecovery(sock, jid);
 }
 
+async function runPreSendSessionRevalidation(sock, jid, context = {}) {
+  if (!sock) return { ok: false };
+
+  const peerJid = normalizePeerJid(jid);
+  if (!peerJid) return { ok: false };
+
+  const idleSinceSendMs =
+    context.idleSinceSendMs !== undefined ? context.idleSinceSendMs : null;
+  const likelyPostIdle =
+    idleSinceSendMs === null || idleSinceSendMs >= LONG_IDLE_MS;
+
+  console.log('[WhatsApp] Pre-send session revalidation starting', {
+    recipientJid: peerJid,
+    socketUptimeMs: context.socketUptimeMs ?? null,
+    queueState: context.queueState ?? null,
+    idleSinceSendMs,
+    likelyPostIdle,
+  });
+
+  let onWhatsAppResult = null;
+  let deviceCount = 0;
+  let sessionsRefreshed = false;
+
+  try {
+    if (typeof sock.sendPresenceUpdate === 'function') {
+      await sock.sendPresenceUpdate('available');
+    }
+
+    if (typeof sock.onWhatsApp === 'function') {
+      onWhatsAppResult = await sock.onWhatsApp(peerJid);
+    }
+
+    const deviceJids = await collectDeviceJids(sock, peerJid);
+    deviceCount = deviceJids.length;
+
+    if (typeof sock.assertSessions === 'function') {
+      sessionsRefreshed = await sock.assertSessions(deviceJids, true);
+    }
+
+    await new Promise((r) => setTimeout(r, PRE_SEND_STABILIZATION_MS));
+
+    console.log('[WhatsApp] Pre-send session revalidation completed', {
+      recipientJid: peerJid,
+      deviceCount,
+      sessionsRefreshed,
+      onWhatsApp: onWhatsAppResult,
+      socketUptimeMs: context.socketUptimeMs ?? null,
+      queueState: context.queueState ?? null,
+      idleSinceSendMs,
+      likelyPostIdle,
+      devicesRefreshedOk: sessionsRefreshed !== false,
+    });
+
+    return {
+      ok: true,
+      deviceCount,
+      sessionsRefreshed,
+      likelyPostIdle,
+    };
+  } catch (err) {
+    console.log(
+      '[WhatsApp] Pre-send session revalidation failed (non-fatal, send continues):',
+      peerJid,
+      err?.message || err
+    );
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
 function attachMessageSessionDiagnostics(sock) {
   const cipherStub = proto.WebMessageInfo.StubType.CIPHERTEXT;
 
@@ -197,6 +268,7 @@ module.exports = {
   installLibsignalLogGuards,
   attachMessageSessionDiagnostics,
   maybeRecoverBeforeSend,
+  runPreSendSessionRevalidation,
   noteSendSuccess,
   normalizePeerJid,
 };

@@ -15,6 +15,7 @@ const {
   installLibsignalLogGuards,
   attachMessageSessionDiagnostics,
   maybeRecoverBeforeSend,
+  runPreSendSessionRevalidation,
   noteSendSuccess,
 } = require('./signalSessionGuard');
 
@@ -380,6 +381,11 @@ function getClient() {
 
       return sendQueue.add(async () => {
         await maybeRecoverBeforeSend(sock, jid);
+        await runPreSendSessionRevalidation(sock, jid, {
+          socketUptimeMs: getSocketUptimeMs(),
+          queueState: getQueueState(),
+          idleSinceSendMs: msSinceLastSend(),
+        });
         await sock.presenceSubscribe(jid);
         await new Promise((r) => setTimeout(r, DELIVERY_WARMUP_MS));
         const res = await sock.sendMessage(jid, { text: String(message ?? '') });
