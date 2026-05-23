@@ -29,6 +29,10 @@ const KEEPALIVE_INTERVAL_MS = 2.5 * 60 * 1000;
 const FALLBACK_REFRESH_INTERVAL_MS = 25 * 60 * 1000;
 const MIN_SOCKET_UPTIME_FOR_FALLBACK_MS = 20 * 60 * 1000;
 const MIN_IDLE_SINCE_SEND_FOR_FALLBACK_MS = 10 * 60 * 1000;
+const MD_RECOVERY_BASE_DELAY_MS = 5000;
+const MD_RECOVERY_COOLDOWN_MS = 30000;
+const MD_RECOVERY_MAX_ATTEMPTS = 8;
+const LONG_IDLE_MS = 60 * 60 * 1000;
 
 const sendQueue = new PQueue({ concurrency: 1 });
 
@@ -51,6 +55,10 @@ let mdMaintenanceTimersStarted = false;
 let preventiveRefreshInProgress = false;
 let socketConnectedAt = null;
 let lastSendActivityAt = null;
+let mdRecoveryTimer = null;
+let mdRecoveryInProgress = false;
+let mdRecoveryFailureCount = 0;
+let mdRecoveryCooldownUntil = 0;
 
 function authDir() {
   // Requirement: store auth session inside "/baileys_auth" (project-local)
@@ -80,6 +88,129 @@ function scheduleReconnect() {
     reconnectTimer = null;
     startWhatsAppClient().catch(() => {});
   }, 5000);
+}
+
+function clearMdRecoveryTimer() {
+  if (mdRecoveryTimer) {
+    clearTimeout(mdRecoveryTimer);
+    mdRecoveryTimer = null;
+  }
+}
+
+function disconnectReasonLabel(statusCode) {
+  if (statusCode == null) return 'unknown';
+  const entry = Object.entries(DisconnectReason).find(([, code]) => code === statusCode);
+  return entry ? entry[0] : String(statusCode);
+}
+
+function isRecoverableMdDisconnect(statusCode) {
+  if (statusCode === DisconnectReason.loggedOut) return false;
+  if (statusCode === DisconnectReason.badSession) return false;
+  if (statusCode === DisconnectReason.forbidden) return false;
+  if (statusCode === DisconnectReason.multideviceMismatch) return false;
+  return true;
+}
+
+function likelyPhoneOffline() {
+  const idleSinceSendMs = msSinceLastSend();
+  const uptimeMs = getSocketUptimeMs();
+  return (
+    (idleSinceSendMs !== null && idleSinceSendMs >= LONG_IDLE_MS) ||
+    uptimeMs >= LONG_IDLE_MS
+  );
+}
+
+function scheduleAutomaticLinkedDeviceRecovery(context) {
+  if (mdRecoveryTimer) return;
+
+  const now = Date.now();
+  if (now < mdRecoveryCooldownUntil) {
+    const waitMs = mdRecoveryCooldownUntil - now;
+    mdRecoveryTimer = setTimeout(() => {
+      mdRecoveryTimer = null;
+      scheduleAutomaticLinkedDeviceRecovery(context);
+    }, waitMs);
+    return;
+  }
+
+  if (
+    preventiveRefreshInProgress ||
+    mdRecoveryInProgress ||
+    socketInitializing ||
+    isConnecting
+  ) {
+    console.log('[WhatsApp] Recovery skipped (lifecycle busy)', context);
+    mdRecoveryTimer = setTimeout(() => {
+      mdRecoveryTimer = null;
+      scheduleAutomaticLinkedDeviceRecovery(context);
+    }, MD_RECOVERY_BASE_DELAY_MS);
+    return;
+  }
+
+  const backoffMs = Math.min(mdRecoveryFailureCount * 2000, 30000);
+  const delayMs = MD_RECOVERY_BASE_DELAY_MS + backoffMs;
+
+  mdRecoveryTimer = setTimeout(() => {
+    mdRecoveryTimer = null;
+    runAutomaticLinkedDeviceRecovery(context).catch((err) => {
+      console.log(
+        '[WhatsApp] Automatic linked-device recovery error (non-fatal):',
+        err?.message || err
+      );
+    });
+  }, delayMs);
+}
+
+async function runAutomaticLinkedDeviceRecovery(context) {
+  if (
+    preventiveRefreshInProgress ||
+    mdRecoveryInProgress ||
+    socketInitializing ||
+    isConnecting
+  ) {
+    console.log('[WhatsApp] Recovery skipped (lifecycle busy)', context);
+    scheduleAutomaticLinkedDeviceRecovery(context);
+    return;
+  }
+
+  console.log('[WhatsApp] Automatic linked-device recovery starting', context);
+
+  mdRecoveryInProgress = true;
+  isWhatsAppReady = false;
+
+  try {
+    await clearReconnectTimer();
+    clearMdRecoveryTimer();
+    endExistingSocket();
+    await connectToWhatsApp();
+    await waitForWhatsAppReady();
+
+    mdRecoveryFailureCount = 0;
+    mdRecoveryCooldownUntil = 0;
+
+    console.log('[WhatsApp] Automatic linked-device recovery completed', {
+      socketUptimeMs: getSocketUptimeMs(),
+      queueState: getQueueState(),
+      disconnectReason: context?.disconnectReason,
+    });
+  } catch (err) {
+    mdRecoveryFailureCount += 1;
+    mdRecoveryCooldownUntil = Date.now() + MD_RECOVERY_COOLDOWN_MS;
+
+    console.log('[WhatsApp] Automatic linked-device recovery failed (non-fatal):', {
+      attempt: mdRecoveryFailureCount,
+      error: err?.message || err,
+      disconnectReason: context?.disconnectReason,
+    });
+
+    if (mdRecoveryFailureCount < MD_RECOVERY_MAX_ATTEMPTS) {
+      scheduleAutomaticLinkedDeviceRecovery(context);
+    } else {
+      scheduleReconnect();
+    }
+  } finally {
+    mdRecoveryInProgress = false;
+  }
 }
 
 function endExistingSocket() {
@@ -328,6 +459,9 @@ async function connectToWhatsApp() {
 
     if (connection === 'open') {
       await clearReconnectTimer();
+      clearMdRecoveryTimer();
+      mdRecoveryFailureCount = 0;
+      mdRecoveryCooldownUntil = 0;
       isConnecting = false;
       socketInitializing = false;
       socketConnectedAt = Date.now();
@@ -354,9 +488,27 @@ async function connectToWhatsApp() {
         return;
       }
 
+      if (mdRecoveryInProgress) {
+        return;
+      }
+
       if (!shouldReconnect) {
         // Logged out: do not spam reconnect. User must re-pair.
         console.log('[WhatsApp] Logged out. Delete /baileys_auth and re-pair if needed.');
+        return;
+      }
+
+      if (isRecoverableMdDisconnect(statusCode)) {
+        const recoveryContext = {
+          statusCode,
+          disconnectReason: disconnectReasonLabel(statusCode),
+          socketUptimeMs: getSocketUptimeMs(),
+          idleSinceSendMs: msSinceLastSend(),
+          likelyPhoneOffline: likelyPhoneOffline(),
+          lastDisconnectMessage: lastDisconnect?.error?.message || null,
+        };
+        console.log('[WhatsApp] Recoverable MD disconnect detected', recoveryContext);
+        scheduleAutomaticLinkedDeviceRecovery(recoveryContext);
         return;
       }
 
@@ -399,7 +551,7 @@ function getClient() {
 }
 
 async function startWhatsAppClient() {
-  if (isWhatsAppReady || preventiveRefreshInProgress) return;
+  if (isWhatsAppReady || preventiveRefreshInProgress || mdRecoveryInProgress) return;
 
   try {
     await connectToWhatsApp();
