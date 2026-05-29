@@ -76,6 +76,18 @@ const userSchema = new mongoose.Schema({
       default: null,
       trim: true
     }
+  },
+  referralSettings: {
+    referralReward: {
+      type: Number,
+      default: 200,
+      min: 0
+    },
+    joiningReward: {
+      type: Number,
+      default: 100,
+      min: 0
+    }
   }
 }, {
   timestamps: true

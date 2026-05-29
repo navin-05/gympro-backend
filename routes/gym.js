@@ -58,4 +58,38 @@ router.put('/profile', auth, async (req, res) => {
   }
 });
 
+// GET /api/gym/referral-settings
+router.get('/referral-settings', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('referralSettings');
+    res.json(user?.referralSettings || { referralReward: 200, joiningReward: 100 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/gym/referral-settings
+router.put('/referral-settings', auth, async (req, res) => {
+  try {
+    const { referralReward, joiningReward } = req.body;
+    const update = {};
+    if (typeof referralReward === 'number' && referralReward >= 0) {
+      update['referralSettings.referralReward'] = referralReward;
+    }
+    if (typeof joiningReward === 'number' && joiningReward >= 0) {
+      update['referralSettings.joiningReward'] = joiningReward;
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: update },
+      { new: true }
+    ).select('referralSettings');
+
+    res.json(user.referralSettings);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 module.exports = router;

@@ -3,14 +3,51 @@ const router = express.Router();
 const Member = require('../models/Member');
 const MembershipPlan = require('../models/MembershipPlan');
 const Renewal = require('../models/Renewal');
+const WalletTransaction = require('../models/WalletTransaction');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
 const QRCode = require('qrcode');
+const {
+  resolveReferrer,
+  getReferralSettings,
+  processReferralForMember,
+} = require('../services/referralSyncService');
 
 // Helper: generate unique referral code
 function generateReferralCode(name) {
   const cleanName = name.replace(/\s+/g, '').substring(0, 4).toUpperCase();
   const random = Math.random().toString(36).substring(2, 7).toUpperCase();
   return `${cleanName}${random}`;
+}
+
+// Backfill referral codes for members created before codes were assigned
+async function ensureReferralCodesForOwner(ownerId) {
+  const membersWithoutCode = await Member.find({
+    owner: ownerId,
+    $or: [
+      { referralCode: { $exists: false } },
+      { referralCode: null },
+      { referralCode: '' },
+    ],
+  }).select('_id name').lean();
+
+  if (membersWithoutCode.length === 0) return false;
+
+  for (const member of membersWithoutCode) {
+    let code;
+    let saved = false;
+    for (let attempt = 0; attempt < 10 && !saved; attempt++) {
+      code = generateReferralCode(member.name);
+      const exists = await Member.exists({ referralCode: code });
+      if (!exists) {
+        await Member.updateOne({ _id: member._id }, { $set: { referralCode: code } });
+        saved = true;
+      }
+    }
+  }
+
+  invalidateOwnerMembersCache(ownerId);
+  return true;
 }
 
 // Simple in-memory cache for fast, repeated member list queries.
@@ -61,14 +98,15 @@ router.get('/', auth, async (req, res) => {
       owner: req.user._id,
       mode,
     });
+    await ensureReferralCodesForOwner(req.user._id);
     const cachedData = getCachedMembers(cacheKey);
-    if (cachedData) {
+    if (cachedData && !cachedData.some((m) => !m.referralCode)) {
       return res.json(cachedData);
     }
 
     const selectFields = mode === 'analytics'
-      ? '_id name mobile photo planName startDate expiryDate paidAmount dueAmount createdAt updatedAt'
-      : '_id name mobile planName expiryDate dueAmount photo';
+      ? '_id name mobile photo planName startDate expiryDate paidAmount dueAmount createdAt updatedAt referralCode'
+      : '_id name mobile planName expiryDate dueAmount photo referralCode';
 
     const members = await Member.find({ owner: req.user._id })
       .select(selectFields)
@@ -93,12 +131,23 @@ router.post('/:id/renewals', auth, async (req, res) => {
   try {
     const planId = req.body.plan || req.body.planId;
     const paidAmount = req.body.paidAmount ?? req.body.amount ?? 0;
+    const walletDiscount = Math.max(0, parseFloat(req.body.walletDiscount) || 0);
 
     const member = await Member.findOne({ _id: req.params.id, owner: req.user._id });
     if (!member) return res.status(404).json({ error: 'Member not found' });
 
     const plan = await MembershipPlan.findOne({ _id: planId, owner: req.user._id });
     if (!plan) return res.status(400).json({ error: 'Invalid membership plan' });
+
+    // Validate wallet discount
+    if (walletDiscount > 0) {
+      if (walletDiscount > (member.walletBalance || 0)) {
+        return res.status(400).json({ error: 'Wallet discount exceeds available balance' });
+      }
+      if (walletDiscount > plan.price) {
+        return res.status(400).json({ error: 'Wallet discount exceeds plan price' });
+      }
+    }
 
     const previousExpiry = new Date(member.expiryDate);
 
@@ -108,7 +157,7 @@ router.post('/:id/renewals', auth, async (req, res) => {
     const newExpiry = new Date(baseDate);
     newExpiry.setDate(newExpiry.getDate() + plan.durationDays);
 
-    const paid = paidAmount || 0;
+    const paid = (paidAmount || 0) + walletDiscount;
     const due = Math.max(0, plan.price - paid);
 
     const renewal = new Renewal({
@@ -129,8 +178,20 @@ router.post('/:id/renewals', auth, async (req, res) => {
     member.planName = plan.planName;
     member.startDate = baseDate;
     member.expiryDate = newExpiry;
-    member.paidAmount = paid;
+    member.paidAmount = paidAmount || 0;
     member.dueAmount = due;
+
+    // Wallet discount deduction
+    if (walletDiscount > 0) {
+      await new WalletTransaction({
+        owner: req.user._id,
+        memberId: member._id,
+        type: 'membership_discount',
+        amount: -walletDiscount,
+        description: `Wallet used for ${plan.planName} renewal`
+      }).save();
+      member.walletBalance = Math.max(0, (member.walletBalance || 0) - walletDiscount);
+    }
 
     await member.save();
     invalidateOwnerMembersCache(req.user._id);
@@ -138,7 +199,7 @@ router.post('/:id/renewals', auth, async (req, res) => {
     const populatedMember = await Member.findById(member._id)
       .populate('plan', 'planName durationDays price');
 
-    res.json({ member: populatedMember, renewal });
+    res.json({ member: populatedMember, renewal, walletDiscount });
 
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -165,6 +226,8 @@ router.get('/:id/renewals', auth, async (req, res) => {
 // GET /api/members/:id
 router.get('/:id', auth, async (req, res) => {
   try {
+    await ensureReferralCodesForOwner(req.user._id);
+
     const member = await Member.findOne({
       _id: req.params.id,
       owner: req.user._id
@@ -219,6 +282,25 @@ router.post('/', auth, async (req, res) => {
 
     await member.save();
     invalidateOwnerMembersCache(req.user._id);
+
+    // ─── Referral Processing (runs after successful member creation) ───
+    if (referredBy) {
+      try {
+        const referrer = await resolveReferrer(req.user._id, {
+          referredBy,
+          referredByMemberId: null,
+        });
+
+        if (referrer) {
+          const settings = await getReferralSettings(req.user._id);
+          await processReferralForMember(req.user._id, member, referrer, settings);
+          invalidateOwnerMembersCache(req.user._id);
+        }
+      } catch (refErr) {
+        // Don't fail member creation if referral processing fails
+        console.log('[Members] Referral processing error (non-fatal):', refErr.message);
+      }
+    }
 
     res.status(201).json(member);
 

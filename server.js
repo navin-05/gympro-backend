@@ -107,6 +107,7 @@ app.use('/api/payments', require('./routes/payments'));
 app.use('/api/attendance', attendanceLimiter, require('./routes/attendance'));
 app.use('/api/transformations', require('./routes/transformations'));
 app.use('/api/referrals', require('./routes/referrals'));
+app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/enquiries', enquiryRoutes);

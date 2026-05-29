@@ -72,6 +72,16 @@ const memberSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  referredByMemberId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Member',
+    default: null
+  },
+  walletBalance: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   qrCode: {
     type: String,
     default: ''
@@ -90,6 +100,7 @@ memberSchema.index({ owner: 1, expiryDate: 1 });
 memberSchema.index({ owner: 1, dueAmount: 1 });
 memberSchema.index({ owner: 1, name: 1 });
 memberSchema.index({ owner: 1, mobile: 1 });
+memberSchema.index({ owner: 1, referralCode: 1 });
 memberSchema.index({ owner: 1, createdAt: -1 });
 
 // Virtual for membership status
