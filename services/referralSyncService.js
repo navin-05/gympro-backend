@@ -2,6 +2,7 @@ const Member = require('../models/Member');
 const Referral = require('../models/Referral');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
+const { createTimer, logPerf } = require('../utils/referralPerfLogger');
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,7 +146,12 @@ async function processReferralForMember(ownerId, referredMember, referrer, setti
  * referredBy / referredByMemberId but were never fully processed.
  */
 async function syncReferralsForOwner(ownerId) {
+  const endpointTimer = createTimer('syncReferralsForOwner-total');
+  const settingsTimer = createTimer('sync-getReferralSettings');
   const settings = await getReferralSettings(ownerId);
+  const settingsMs = settingsTimer.end().durationMs;
+
+  const findReferredTimer = createTimer('sync-findReferredMembers');
   const referredMembers = await Member.find({
     owner: ownerId,
     $or: [
@@ -153,19 +159,57 @@ async function syncReferralsForOwner(ownerId) {
       { referredBy: { $nin: ['', null] } },
     ],
   });
+  const findReferredMs = findReferredTimer.end().durationMs;
 
   let synced = 0;
+  let resolveReferrerMs = 0;
+  let processReferralMs = 0;
+  let resolveReferrerCalls = 0;
+  let processReferralCalls = 0;
+
   for (const referredMember of referredMembers) {
+    const resolveTimer = createTimer('sync-resolveReferrer');
     const referrer = await resolveReferrer(ownerId, referredMember);
+    resolveReferrerMs += resolveTimer.end().durationMs;
+    resolveReferrerCalls += 1;
     if (!referrer) continue;
+
+    const processTimer = createTimer('sync-processReferralForMember');
     const result = await processReferralForMember(
       ownerId,
       referredMember,
       referrer,
       settings
     );
+    processReferralMs += processTimer.end().durationMs;
+    processReferralCalls += 1;
     if (result) synced += 1;
   }
+
+  const totalMs = endpointTimer.end().durationMs;
+  logPerf('syncReferralsForOwner', {
+    ownerId: String(ownerId),
+    referredMemberCount: referredMembers.length,
+    synced,
+    timingsMs: {
+      total: totalMs,
+      getReferralSettings: settingsMs,
+      findReferredMembers: findReferredMs,
+      resolveReferrerTotal: Math.round(resolveReferrerMs * 100) / 100,
+      resolveReferrerAvg: resolveReferrerCalls
+        ? Math.round((resolveReferrerMs / resolveReferrerCalls) * 100) / 100
+        : 0,
+      processReferralTotal: Math.round(processReferralMs * 100) / 100,
+      processReferralAvg: processReferralCalls
+        ? Math.round((processReferralMs / processReferralCalls) * 100) / 100
+        : 0,
+    },
+    callCounts: {
+      resolveReferrer: resolveReferrerCalls,
+      processReferralForMember: processReferralCalls,
+    },
+  });
+
   return synced;
 }
 

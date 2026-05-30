@@ -5,6 +5,16 @@ const Referral = require('../models/Referral');
 const WalletTransaction = require('../models/WalletTransaction');
 const auth = require('../middleware/auth');
 const { syncReferralsForOwner } = require('../services/referralSyncService');
+const {
+  createTimer,
+  analyzePayload,
+  byteSizeOfJson,
+  formatBytes,
+  logPerf,
+  logEndpointSummary,
+} = require('../utils/referralPerfLogger');
+
+const PERF_BENCHMARK = process.env.REFERRAL_PERF_BENCHMARK === '1';
 
 function generateReferralCode(name) {
   const cleanName = name.replace(/\s+/g, '').substring(0, 4).toUpperCase();
@@ -35,6 +45,47 @@ async function ensureReferralCodesForOwner(ownerId) {
       }
     }
   }
+}
+
+function buildListQuery(ownerId, filter) {
+  const query = { owner: ownerId };
+  const now = new Date();
+  if (filter === 'today') {
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    query.createdAt = { $gte: startOfDay };
+  } else if (filter === 'month') {
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    query.createdAt = { $gte: startOfMonth };
+  }
+  return query;
+}
+
+async function runReferralsListQuery(query, limit) {
+  const findTimer = createTimer('referrals-find');
+  const findQuery = Referral.find(query)
+    .sort({ createdAt: -1 })
+    .limit(limit);
+
+  const populateReferrerTimer = createTimer('referrals-populate-referrerId');
+  findQuery.populate('referrerId', 'name referralCode photo');
+  const populateReferrerMs = populateReferrerTimer.end().durationMs;
+
+  const populateReferredTimer = createTimer('referrals-populate-referredMemberId');
+  findQuery.populate('referredMemberId', 'name mobile photo');
+  const populateReferredMs = populateReferredTimer.end().durationMs;
+
+  const referrals = await findQuery.lean();
+  const findMs = findTimer.end().durationMs;
+
+  return {
+    referrals,
+    timings: {
+      findAndPopulateMs: findMs,
+      populateSetupReferrerMs: populateReferrerMs,
+      populateSetupReferredMs: populateReferredMs,
+      note: 'findAndPopulateMs includes MongoDB find + populate lookups + sort',
+    },
+  };
 }
 
 // GET /api/referrals/leaderboard
@@ -105,39 +156,95 @@ router.get('/search-members', auth, async (req, res) => {
 // GET /api/referrals/list?filter=today|month|all
 // Paginated referral records
 router.get('/list', auth, async (req, res) => {
+  const endpointTimer = createTimer('GET /referrals/list-total');
+  const ownerId = req.user._id;
+  const filter = req.query.filter || 'all';
+
   try {
-    await syncReferralsForOwner(req.user._id);
+    const syncTimer = createTimer('referrals-syncReferralsForOwner');
+    await syncReferralsForOwner(ownerId);
+    const syncMs = syncTimer.end().durationMs;
 
-    const filter = req.query.filter || 'all';
-    const query = { owner: req.user._id };
+    const query = buildListQuery(ownerId, filter);
 
-    const now = new Date();
-    if (filter === 'today') {
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      query.createdAt = { $gte: startOfDay };
-    } else if (filter === 'month') {
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      query.createdAt = { $gte: startOfMonth };
+    const queryTimer = createTimer('referrals-query');
+    const { referrals, timings: queryTimings } = await runReferralsListQuery(query, 200);
+    const queryMs = queryTimer.end().durationMs;
+
+    const serializeTimer = createTimer('referrals-serialize');
+    const payloadAnalysis = analyzePayload(referrals);
+    const serialized = JSON.stringify(referrals);
+    const serializeMs = serializeTimer.end().durationMs;
+    const responseBytes = Buffer.byteLength(serialized, 'utf8');
+
+    const totalMs = endpointTimer.end().durationMs;
+
+    logEndpointSummary({
+      endpoint: 'GET /referrals/list',
+      ownerId,
+      filter,
+      timings: {
+        totalMs,
+        syncReferralsForOwnerMs: syncMs,
+        referralsQueryMs: queryMs,
+        ...queryTimings,
+        serializationMs: serializeMs,
+        responseBytes,
+        responseSizeFormatted: formatBytes(responseBytes),
+      },
+      payloadAnalysis,
+    });
+
+    if (PERF_BENCHMARK) {
+      const benchmarkTimer = createTimer('referrals-benchmark-limit20');
+      const { referrals: referrals20, timings: timings20 } = await runReferralsListQuery(query, 20);
+      const benchmarkMs = benchmarkTimer.end().durationMs;
+      const benchmarkPayload = analyzePayload(referrals20);
+      logPerf('benchmark-limit-comparison', {
+        ownerId: String(ownerId),
+        filter,
+        limit200: {
+          queryMs,
+          responseBytes,
+          responseSizeFormatted: formatBytes(responseBytes),
+          recordCount: referrals.length,
+        },
+        limit20: {
+          queryMs: benchmarkMs,
+          responseBytes: byteSizeOfJson(referrals20),
+          responseSizeFormatted: formatBytes(byteSizeOfJson(referrals20)),
+          recordCount: referrals20.length,
+          ...timings20,
+        },
+        payloadAnalysisLimit20: benchmarkPayload,
+      });
     }
-
-    const referrals = await Referral.find(query)
-      .populate('referrerId', 'name referralCode photo')
-      .populate('referredMemberId', 'name mobile photo')
-      .sort({ createdAt: -1 })
-      .limit(200)
-      .lean();
 
     res.json(referrals);
   } catch (error) {
+    const totalMs = endpointTimer.end().durationMs;
+    logPerf('endpoint-error', {
+      endpoint: 'GET /referrals/list',
+      ownerId: String(ownerId),
+      filter,
+      totalMs,
+      error: error.message,
+    });
     res.status(500).json({ error: error.message });
   }
 });
 
 // GET /api/referrals/stats — analytics
 router.get('/stats', auth, async (req, res) => {
-  try {
-    await syncReferralsForOwner(req.user._id);
+  const endpointTimer = createTimer('GET /referrals/stats-total');
+  const ownerId = req.user._id;
 
+  try {
+    const syncTimer = createTimer('stats-syncReferralsForOwner');
+    await syncReferralsForOwner(ownerId);
+    const syncMs = syncTimer.end().durationMs;
+
+    const statsTimer = createTimer('stats-query');
     const [
       totalReferrals,
       totalRewardsPaid,
@@ -169,14 +276,52 @@ router.get('/stats', auth, async (req, res) => {
         referredByMemberId: { $ne: null }
       })
     ]);
+    const statsQueryMs = statsTimer.end().durationMs;
 
-    res.json({
+    const response = {
       totalReferrals,
       totalRewardsPaid: totalRewardsPaid[0]?.total || 0,
       topReferrer: topReferrer || null,
       membersViaReferrals
+    };
+
+    const serializeTimer = createTimer('stats-serialize');
+    const serialized = JSON.stringify(response);
+    const serializeMs = serializeTimer.end().durationMs;
+    const responseBytes = Buffer.byteLength(serialized, 'utf8');
+    const totalMs = endpointTimer.end().durationMs;
+
+    logEndpointSummary({
+      endpoint: 'GET /referrals/stats',
+      ownerId,
+      filter: null,
+      timings: {
+        totalMs,
+        syncReferralsForOwnerMs: syncMs,
+        statsQueryMs,
+        serializationMs: serializeMs,
+        responseBytes,
+        responseSizeFormatted: formatBytes(responseBytes),
+      },
+      payloadAnalysis: {
+        totalReferrals,
+        membersViaReferrals,
+        topReferrerPhotoBytes: topReferrer?.photo?.length || 0,
+        topReferrerHasBase64Photo: Boolean(
+          topReferrer?.photo && topReferrer.photo.startsWith('data:image/')
+        ),
+      },
     });
+
+    res.json(response);
   } catch (error) {
+    const totalMs = endpointTimer.end().durationMs;
+    logPerf('endpoint-error', {
+      endpoint: 'GET /referrals/stats',
+      ownerId: String(ownerId),
+      totalMs,
+      error: error.message,
+    });
     res.status(500).json({ error: error.message });
   }
 });
