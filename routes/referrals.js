@@ -60,10 +60,11 @@ function buildListQuery(ownerId, filter) {
   return query;
 }
 
-async function runReferralsListQuery(query, limit) {
+async function runReferralsListQuery(query, limit, skip = 0) {
   const findOnlyTimer = createTimer('referrals-find-only');
   const docs = await Referral.find(query)
     .sort({ createdAt: -1 })
+    .skip(skip)
     .limit(limit)
     .lean();
   const findOnlyMs = findOnlyTimer.end().durationMs;
@@ -211,27 +212,51 @@ router.get('/search-members', auth, async (req, res) => {
   }
 });
 
-// GET /api/referrals/list?filter=today|month|all
-// Paginated referral records
+function shouldSkipSync(req) {
+  const v = req.query.skipSync;
+  return v === '1' || v === 'true';
+}
+
+// GET /api/referrals/list?filter=today|month|all&limit=&skip=&skipSync=
+// Without limit: returns array (max 200). With limit: returns { referrals, total, skip, limit, hasMore }.
 router.get('/list', auth, async (req, res) => {
   const endpointTimer = createTimer('GET /referrals/list-total');
   const ownerId = req.user._id;
   const filter = req.query.filter || 'all';
+  const skipSync = shouldSkipSync(req);
+  const usePagination = req.query.limit !== undefined && req.query.limit !== '';
+  const limit = usePagination
+    ? Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 200)
+    : 200;
+  const skip = usePagination ? Math.max(parseInt(req.query.skip, 10) || 0, 0) : 0;
 
   try {
-    const syncTimer = createTimer('referrals-syncReferralsForOwner');
-    await syncReferralsForOwner(ownerId);
-    const syncMs = syncTimer.end().durationMs;
+    let syncMs = 0;
+    if (!skipSync) {
+      const syncTimer = createTimer('referrals-syncReferralsForOwner');
+      await syncReferralsForOwner(ownerId);
+      syncMs = syncTimer.end().durationMs;
+    }
 
     const query = buildListQuery(ownerId, filter);
 
     const queryTimer = createTimer('referrals-query');
-    const { referrals, timings: queryTimings } = await runReferralsListQuery(query, 200);
+    const total = usePagination ? await Referral.countDocuments(query) : null;
+    const { referrals, timings: queryTimings } = await runReferralsListQuery(query, limit, skip);
     const queryMs = queryTimer.end().durationMs;
 
     const serializeTimer = createTimer('referrals-serialize');
     const payloadAnalysis = analyzePayload(referrals);
-    const serialized = JSON.stringify(referrals);
+    const responseBody = usePagination
+      ? {
+        referrals,
+        total,
+        skip,
+        limit,
+        hasMore: skip + referrals.length < total,
+      }
+      : referrals;
+    const serialized = JSON.stringify(responseBody);
     const serializeMs = serializeTimer.end().durationMs;
     const responseBytes = Buffer.byteLength(serialized, 'utf8');
 
@@ -243,6 +268,10 @@ router.get('/list', auth, async (req, res) => {
       filter,
       timings: {
         totalMs,
+        skipSync,
+        usePagination,
+        limit,
+        skip,
         syncReferralsForOwnerMs: syncMs,
         referralsQueryMs: queryMs,
         ...queryTimings,
@@ -255,7 +284,7 @@ router.get('/list', auth, async (req, res) => {
 
     if (PERF_BENCHMARK) {
       const benchmarkTimer = createTimer('referrals-benchmark-limit20');
-      const { referrals: referrals20, timings: timings20 } = await runReferralsListQuery(query, 20);
+      const { referrals: referrals20, timings: timings20 } = await runReferralsListQuery(query, 20, 0);
       const benchmarkMs = benchmarkTimer.end().durationMs;
       const benchmarkPayload = analyzePayload(referrals20);
       logPerf('benchmark-limit-comparison', {
@@ -278,7 +307,7 @@ router.get('/list', auth, async (req, res) => {
       });
     }
 
-    res.json(referrals);
+    res.json(responseBody);
   } catch (error) {
     const totalMs = endpointTimer.end().durationMs;
     logPerf('endpoint-error', {
@@ -297,10 +326,15 @@ router.get('/stats', auth, async (req, res) => {
   const endpointTimer = createTimer('GET /referrals/stats-total');
   const ownerId = req.user._id;
 
+  const skipSync = shouldSkipSync(req);
+
   try {
-    const syncTimer = createTimer('stats-syncReferralsForOwner');
-    await syncReferralsForOwner(ownerId);
-    const syncMs = syncTimer.end().durationMs;
+    let syncMs = 0;
+    if (!skipSync) {
+      const syncTimer = createTimer('stats-syncReferralsForOwner');
+      await syncReferralsForOwner(ownerId);
+      syncMs = syncTimer.end().durationMs;
+    }
 
     const statsTimer = createTimer('stats-queries-parallel');
     const {
@@ -331,6 +365,7 @@ router.get('/stats', auth, async (req, res) => {
       filter: null,
       timings: {
         totalMs,
+        skipSync,
         syncReferralsForOwnerMs: syncMs,
         statsQueryMs,
         statsQueryBreakdown: queryTimings,

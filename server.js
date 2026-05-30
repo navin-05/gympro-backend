@@ -154,10 +154,16 @@ const startServer = async () => {
       triggerScheduledNotificationsIfDue('startup').catch(() => {});
     }, 45000);
 
-    app.listen(PORT, () => {
+    const http = require('http');
+    const server = http.createServer(app);
+    const { initReferralRealtime } = require('./services/referralRealtime');
+    initReferralRealtime(server);
+
+    server.listen(PORT, () => {
       console.log(`\n🏋️ Gym Management API running on port ${PORT}`);
       console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`   Health check: /api/health\n`);
+      console.log(`   Health check: /api/health`);
+      console.log(`   Referral realtime: Socket.IO /socket.io\n`);
     });
 
   } catch (error) {

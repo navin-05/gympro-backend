@@ -3,6 +3,14 @@ const Referral = require('../models/Referral');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
 const { createTimer, logPerf } = require('../utils/referralPerfLogger');
+const { emitReferralCreated } = require('./referralRealtime');
+
+async function populateReferralDoc(referralId) {
+  return Referral.findById(referralId)
+    .populate('referrerId', 'name referralCode photo')
+    .populate('referredMemberId', 'name mobile photo')
+    .lean();
+}
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -136,6 +144,17 @@ async function processReferralForMember(ownerId, referredMember, referrer, setti
       { _id: referredMember._id },
       { $inc: { walletBalance: joiningRewardAmt } }
     );
+  }
+
+  if (isNewReferral && referral?._id) {
+    try {
+      const populated = await populateReferralDoc(referral._id);
+      if (populated) {
+        emitReferralCreated(ownerId, populated);
+      }
+    } catch (err) {
+      console.log('[ReferralRealtime] emit failed:', err.message);
+    }
   }
 
   return referral;
