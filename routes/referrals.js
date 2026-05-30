@@ -61,30 +61,88 @@ function buildListQuery(ownerId, filter) {
 }
 
 async function runReferralsListQuery(query, limit) {
-  const findTimer = createTimer('referrals-find');
-  const findQuery = Referral.find(query)
+  const findOnlyTimer = createTimer('referrals-find-only');
+  const docs = await Referral.find(query)
     .sort({ createdAt: -1 })
-    .limit(limit);
+    .limit(limit)
+    .lean();
+  const findOnlyMs = findOnlyTimer.end().durationMs;
 
-  const populateReferrerTimer = createTimer('referrals-populate-referrerId');
-  findQuery.populate('referrerId', 'name referralCode photo');
-  const populateReferrerMs = populateReferrerTimer.end().durationMs;
+  const populateTimer = createTimer('referrals-populate');
+  await Referral.populate(docs, [
+    { path: 'referrerId', select: 'name referralCode photo' },
+    { path: 'referredMemberId', select: 'name mobile photo' },
+  ]);
+  const populateMs = populateTimer.end().durationMs;
 
-  const populateReferredTimer = createTimer('referrals-populate-referredMemberId');
-  findQuery.populate('referredMemberId', 'name mobile photo');
-  const populateReferredMs = populateReferredTimer.end().durationMs;
-
-  const referrals = await findQuery.lean();
-  const findMs = findTimer.end().durationMs;
+  logPerf('referrals-list-query-breakdown', {
+    limit,
+    findOnlyMs,
+    populateMs,
+    combinedMs: Math.round((findOnlyMs + populateMs) * 100) / 100,
+    recordCount: docs.length,
+  });
 
   return {
-    referrals,
+    referrals: docs,
     timings: {
-      findAndPopulateMs: findMs,
-      populateSetupReferrerMs: populateReferrerMs,
-      populateSetupReferredMs: populateReferredMs,
-      note: 'findAndPopulateMs includes MongoDB find + populate lookups + sort',
+      findOnlyMs,
+      populateMs,
+      findAndPopulateMs: Math.round((findOnlyMs + populateMs) * 100) / 100,
     },
+  };
+}
+
+async function timedQuery(label, fn) {
+  const timer = createTimer(label);
+  const result = await fn();
+  const { durationMs } = timer.end();
+  return { label, durationMs, result };
+}
+
+async function runStatsQueries(ownerId) {
+  const owner = ownerId;
+  const results = await Promise.all([
+    timedQuery('stats-total-referrals-count', () =>
+      Referral.countDocuments({ owner })
+    ),
+    timedQuery('stats-total-rewards-aggregate', () =>
+      WalletTransaction.aggregate([
+        {
+          $match: {
+            owner,
+            type: { $in: ['referral_reward', 'joining_bonus'] },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ])
+    ),
+    timedQuery('stats-top-referrer-find', () =>
+      Member.findOne({
+        owner,
+        referralCount: { $gt: 0 },
+      })
+        .select('name referralCode referralCount photo')
+        .sort({ referralCount: -1 })
+        .lean()
+    ),
+    timedQuery('stats-members-via-referrals-count', () =>
+      Member.countDocuments({
+        owner,
+        referredByMemberId: { $ne: null },
+      })
+    ),
+  ]);
+
+  const queryTimings = results.map(({ label, durationMs }) => ({ op: label, durationMs }));
+  logPerf('stats-query-breakdown', { queryTimings });
+
+  return {
+    totalReferrals: results[0].result,
+    totalRewardsPaid: results[1].result,
+    topReferrer: results[2].result,
+    membersViaReferrals: results[3].result,
+    queryTimings,
   };
 }
 
@@ -244,45 +302,21 @@ router.get('/stats', auth, async (req, res) => {
     await syncReferralsForOwner(ownerId);
     const syncMs = syncTimer.end().durationMs;
 
-    const statsTimer = createTimer('stats-query');
-    const [
+    const statsTimer = createTimer('stats-queries-parallel');
+    const {
       totalReferrals,
       totalRewardsPaid,
       topReferrer,
-      membersViaReferrals
-    ] = await Promise.all([
-      Referral.countDocuments({ owner: req.user._id }),
-
-      WalletTransaction.aggregate([
-        {
-          $match: {
-            owner: req.user._id,
-            type: { $in: ['referral_reward', 'joining_bonus'] }
-          }
-        },
-        { $group: { _id: null, total: { $sum: '$amount' } } }
-      ]),
-
-      Member.findOne({
-        owner: req.user._id,
-        referralCount: { $gt: 0 }
-      })
-        .select('name referralCode referralCount photo')
-        .sort({ referralCount: -1 })
-        .lean(),
-
-      Member.countDocuments({
-        owner: req.user._id,
-        referredByMemberId: { $ne: null }
-      })
-    ]);
+      membersViaReferrals,
+      queryTimings,
+    } = await runStatsQueries(ownerId);
     const statsQueryMs = statsTimer.end().durationMs;
 
     const response = {
       totalReferrals,
       totalRewardsPaid: totalRewardsPaid[0]?.total || 0,
       topReferrer: topReferrer || null,
-      membersViaReferrals
+      membersViaReferrals,
     };
 
     const serializeTimer = createTimer('stats-serialize');
@@ -299,6 +333,7 @@ router.get('/stats', auth, async (req, res) => {
         totalMs,
         syncReferralsForOwnerMs: syncMs,
         statsQueryMs,
+        statsQueryBreakdown: queryTimings,
         serializationMs: serializeMs,
         responseBytes,
         responseSizeFormatted: formatBytes(responseBytes),
